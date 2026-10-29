@@ -1,0 +1,25 @@
+{
+  "organisationsnummer": "",
+  "foretag": "",
+  "adress": "",
+  "postnummer": "",
+  "postort": "",
+  "kontaktperson": "",
+  "telefon": "",
+  "epost": "",
+  "anvandarid": "",
+  "file_id_prefix": "BLN",
+  "file_id_number": 1,
+  "ts_spec_version": "",
+  "auto_register_vins": true,
+  "validate_before_generate": true,
+  "backup_responses": true,
+  "use_vehicle_data_page": true,
+  "use_ts_spec_schema": true,
+  "include_extra_post_types": false,
+  "extra_post_types_whitelist": [],
+  "_meta": {
+    "updated_at": "2026-03-10T16:35:25.841014",
+    "version": "4.1.0"
+  }
+}

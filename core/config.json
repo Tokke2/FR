@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "app_name": "Transportstyrelsen Fordonsregistreringssystem",
+  "startup": false,
+  "start_minimized": true,
+  "theme": "auto",
+  "visible_tabs": [],
+  "minimize_to_tray": true,
+  "close_to_tray": true,
+  "plugin_states": {},
+  "mode": "prod",
+  "smart_cache": true,
+  "window": {
+    "width": 1200,
+    "height": 800,
+    "x": -1,
+    "y": -1,
+    "maximized": false
+  }
+}

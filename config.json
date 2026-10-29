@@ -1,0 +1,139 @@
+{
+  "app_name": "Filregistrering",
+  "app_version": "1.0.0",
+  "app_author": "Rickard Längkvist",
+  "debug": false,
+  "paths": {
+    "base_dir": ".",
+    "data_dir": "data",
+    "vehicles_dir": "data/vehicles",
+    "dispatch_dir": "dispatch",
+    "output_dir": "ut",
+    "logs_dir": "logs",
+    "plugins_dir": "plugins",
+    "cache_dir": "cache",
+    "mappings_dir": "data/mappings",
+    "js_data_dir": ".js data"
+  },
+  "window": {
+    "width": 1400,
+    "height": 900,
+    "sidebar_width": 220,
+    "remember_position": true,
+    "start_minimized": true
+  },
+  "plugins": {
+    "enabled": [
+      "core_config",
+      "core_logger",
+      "core_auth",
+      "about",
+      "ts_schema_manager",
+      "ts_spec_import",
+      "data_mapping",
+      "sap_import",
+      "sap_editor",
+      "vehicle_registry",
+      "vin_tracking",
+      "color_import",
+      "dealers_manager",
+      "colors_manager",
+      "dispatch_viewer",
+      "identity_post",
+      "ts_file_generator",
+      "response_viewer",
+      "data_viewer",
+      "reports",
+      "main_gui"
+    ],
+    "load_order": [
+      "core_config",
+      "core_logger",
+      "core_auth",
+      "about",
+      "ts_schema_manager",
+      "ts_spec_import",
+      "data_mapping",
+      "sap_import",
+      "sap_editor",
+      "vehicle_registry",
+      "vin_tracking",
+      "color_import",
+      "dealers_manager",
+      "colors_manager",
+      "dispatch_viewer",
+      "identity_post",
+      "ts_file_generator",
+      "response_viewer",
+      "data_viewer",
+      "reports",
+      "main_gui"
+    ],
+    "disabled": []
+  },
+  "logging": {
+    "level": "INFO",
+    "file_logging": true,
+    "max_log_files": 10,
+    "log_to_console": true,
+    "max_log_size_mb": 10
+  },
+  "theme": {
+    "mode": "dark"
+  },
+  "smart_cache": {
+    "enabled": true
+  },
+  "features": {
+    "auto_load_dispatch": true,
+    "auto_load_delay_ms": 500,
+    "skip_registered_vins": true,
+    "validate_before_generate": true,
+    "auto_backup": true,
+    "backup_max_age_days": 30,
+    "backup_max_count": 50
+  },
+  "ui": {
+    "theme": "dark",
+    "font_family": "Segoe UI",
+    "font_size": 14,
+    "use_alternating_row_colors": true,
+    "enable_tooltips": true
+  },
+  "defaults": {
+    "pin": "1234",
+    "sender_org": "556677-8899",
+    "responsible": "Admin",
+    "company_name": "TADEGA AB",
+    "color_code": "0",
+    "file_id_prefix": "BLN"
+  },
+  "vehicle_data": {
+    "pin": null,
+    "auto_lock_minutes": 10,
+    "autosave_delay_ms": 700,
+    "default_years": [
+      2024,
+      2025
+    ],
+    "default_values": {
+      "skyltformat_bak": "Tvåradig 170x150",
+      "bestallning_regbevis": "Ja",
+      "kommissionssparr": "N",
+      "euroklass": "5",
+      "bransle1": "BENSIN"
+    }
+  },
+  "database": {
+    "type": "sqlite",
+    "filename": "tadega_fordon.db",
+    "backup_on_close": true
+  },
+  "_meta": {
+    "created_at": "2026-08-07T07:10:00",
+    "updated_at": "2026-08-07T07:10:00",
+    "schema_version": "1.0",
+    "config_version": "1.0",
+    "last_shutdown": "2026-08-07T17:03:17.352074"
+  }
+}
