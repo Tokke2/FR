@@ -1,0 +1,359 @@
+Filregistrering/
+├── core/
+│   ├── application.py
+│   ├── config.json
+│   ├── config.py
+│   ├── event_bus.py
+│   ├── exceptions.py
+│   ├── init.py
+│   ├── plugin_base.py
+│   └── plugin_loader.py
+├── data/
+│   ├── end_post/
+│   │   └── config.json
+│   ├── registration_post/
+│   │   └── config.json
+│   ├── sap_cache/
+│   ├── transportstyrelsen/
+│   │   ├── backup/
+│   │   ├── status/
+│   │   └── config.json
+│   ├── ts_excel_importer/
+│   │   └── import_history.json
+│   ├── ts_file_generator/
+│   │   ├── backup/
+│   │   ├── status/
+│   │   ├── config.json
+│   │   └── file_id_series.json
+│   ├── ts_specs/
+│   │   └── backup/
+│   ├── vehicle_registry/
+│   └── vehicles/
+├── dispatch/
+├── In/
+├── logs/
+│   ├── app.log
+│   ├── app_20260306.log
+│   ├── app_20260309.log
+│   ├── app_20260310.log
+│   ├── app_20260311.log
+│   ├── app_20260312.log
+│   ├── app_20260313.log
+│   ├── audit.log
+│   ├── core.log
+│   ├── errors.log
+│   ├── events.log
+│   ├── export.log
+│   ├── gui.log
+│   ├── import.log
+│   ├── plugin_ts_schema_manager.log
+│   ├── plugins.log
+│   ├── response.log
+│   ├── schema.log
+│   ├── ts_file.log
+│   └── vehicle.log
+├── plugins/
+│   ├── about/
+│   │   └── plugin.py
+│   ├── buntpost/
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── color_import/
+│   │   └── plugin.py
+│   ├── colors_manager/
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── core_auth/
+│   │   └── plugin.py
+│   ├── core_config/
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── core_logger/
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── data_mapping/
+│   │   ├── init.py
+│   │   ├── plugin.py
+│   │   └── widget.py
+│   ├── data_viewer/
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── dealers_manager/
+│   │   ├── auth/
+│   │   │   └── password_manager.py
+│   │   ├── import_logic/
+│   │   │   ├── excel_reader.py
+│   │   │   └── synonyms.py
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── dispatch_viewer/
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── end_post/
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── gui_helpers/
+│   │   ├── components/
+│   │   │   ├── __init__.py
+│   │   │   ├── buttons.py
+│   │   │   ├── dialogs.py
+│   │   │   ├── forms.py
+│   │   │   ├── styles.py
+│   │   │   └── validators.py
+│   │   └── plugin.py
+│   ├── identity_post/
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── main_gui/
+│   │   ├── dialogs/
+│   │   │   ├── __init__.py
+│   │   │   ├── import_progress.py
+│   │   │   ├── password_dialog.py
+│   │   │   └── vin_report_dialog.py
+│   │   ├── __init__.py
+│   │   ├── plugin.py
+│   │   └── vehicle_registry_page.py
+│   ├── post_format/
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── reports/
+│   │   ├── __init__.py
+│   │   ├── exporters.py
+│   │   └── plugin.py
+│   ├── response_viewer/
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── sap_editor/
+│   │   ├── ui/
+│   │   │   └── editor_window.py
+│   │   └── plugin.py
+│   ├── sap_import/
+│   │   ├── core/
+│   │   │   ├── __init__.py
+│   │   │   ├── column_resolver.py
+│   │   │   ├── data_normalizer.py
+│   │   │   ├── date_converter.py
+│   │   │   └── excel_reader.py
+│   │   ├── database/
+│   │   │   ├── __init__.py
+│   │   │   └── importer.py
+│   │   ├── models/
+│   │   │   ├── __init__.py
+│   │   │   └── results.py
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── ts_excel_importer/
+│   │   ├── __init__.py
+│   │   ├── parser.py
+│   │   ├── plugin.py
+│   │   └── widget.py
+│   ├── ts_file_generator/
+│   │   ├── __init__.py
+│   │   └── plugin.py
+│   ├── ts_schema_manager/
+│   │   ├── __init__.py
+│   │   ├── constants.py
+│   │   ├── models.py
+│   │   ├── plugin.py
+│   │   └── version_manager.py
+│   ├── ts_spec_import/
+│   │   ├── __init__.py
+│   │   ├── models.py
+│   │   └── plugin.py
+│   ├── ts_spec_viewer/                      # PLUGIN | Visning, jämförelse och export av TS-scheman
+│   │   └── plugin.py                        # PLUGIN | TS Spec Viewer Plugin
+│   │                                          # VERSION 1.0.0 | plugins/ts_spec_viewer/plugin.py
+│   │                                          # Syfte: visualisera, jämföra och inspektera
+│   │                                          # Transportstyrelsens schema/specifikationer;
+│   │                                          # visar aktiv version, posttyper, fältdetaljer,
+│   │                                          # versionsdiff och export till JSON
+│   │                                          # Integrerar med:
+│   │                                          # ts_schema_manager(source of truth),
+│   │                                          # ts_excel_importer(valfri),
+│   │                                          # main_gui eller annat GUI-lager via create_widget()
+│   │                                          # Imports:
+│   │                                          # __future__.annotations,
+│   │                                          # json, logging,
+│   │                                          # datetime.datetime,
+│   │                                          # pathlib.Path,
+│   │                                          # typing.Any/Callable/Dict/List/Optional/TYPE_CHECKING,
+│   │                                          # core.plugin_base.PluginBase/PluginMetadata,
+│   │                                          # PySide6.QtCore.Qt/Signal/QTimer(valfri),
+│   │                                          # PySide6.QtWidgets.QWidget/QVBoxLayout/QHBoxLayout/
+│   │                                          # QLabel/QPushButton/QTableWidget/QTableWidgetItem/
+│   │                                          # QHeaderView/QGroupBox/QComboBox/QTextEdit/QSplitter/
+│   │                                          # QTabWidget/QMessageBox/QFileDialog/QTreeWidget/
+│   │                                          # QTreeWidgetItem/QFrame/QFormLayout/QScrollArea(valfri),
+│   │                                          # PySide6.QtGui.QFont/QColor(valfri)
+│   │                                          # Metadata:
+│   │                                          # METADATA: name="ts_spec_viewer",
+│   │                                          # version="1.0.0",
+│   │                                          # description="Visualisera och jämför TS-specifikationer",
+│   │                                          # author="System",
+│   │                                          # dependencies=(),
+│   │                                          # optional_dependencies=("ts_schema_manager","ts_excel_importer"),
+│   │                                          # has_ui=True,
+│   │                                          # screen_aware=False
+│   │                                          # Klass-attribut:
+│   │                                          # NAME="TS Spec Viewer",
+│   │                                          # VERSION="1.0.0",
+│   │                                          # DESCRIPTION="Visualisera och jämför TS-specifikationer",
+│   │                                          # AUTHOR="System",
+│   │                                          # DEPENDENCIES=[],
+│   │                                          # OPTIONAL_DEPENDENCIES=["ts_schema_manager","ts_excel_importer"]
+│   │                                          # Helpers:
+│   │                                          # get_plugin_safe(app,name):
+│   │                                          # app.get_plugin(name) eller app.plugin_loader.get_plugin(name)
+│   │                                          # get_schema_manager(app):
+│   │                                          # returnerar ts_schema_manager
+│   │                                          # get_active_version_safe(app):
+│   │                                          # mgr.get_active_version() eller None
+│   │                                          # get_all_schemas_safe(app):
+│   │                                          # mgr.get_all_schemas() eller {}
+│   │                                          # list_versions_safe(app):
+│   │                                          # mgr.list_versions() -> List[str],
+│   │                                          # stöd både version-objekt med .version och rena strängar
+│   │                                          # Plugin(PluginBase):
+│   │                                          # __init__(app):
+│   │                                          # _widget=None
+│   │                                          # initialize():
+│   │                                          # loggar initiering
+│   │                                          # activate():
+│   │                                          # is_active=True
+│   │                                          # deactivate():
+│   │                                          # is_active=False,
+│   │                                          # _widget=None
+│   │                                          # Public API:
+│   │                                          # create_widget(parent=None) -> QWidget|None:
+│   │                                          # skapar TSSpecViewerWidget om PySide6 finns
+│   │                                          # compare_versions(version1, version2) -> Dict:
+│   │                                          # använder helst ts_schema_manager.compare_versions(),
+│   │                                          # returnerar {"added","removed","modified"} och ev. "error"
+│   │                                          # _manual_compare(version1, version2) -> Dict:
+│   │                                          # fallback om manager saknar compare_versions(),
+│   │                                          # hämtar schemas för båda versioner via get_all_schemas(version),
+│   │                                          # added = posttyper i v2 men inte v1,
+│   │                                          # removed = posttyper i v1 men inte v2,
+│   │                                          # modified = samma posttyp men annan checksum
+│   │                                          # eller annat antal fält
+│   │                                          # get_schema_info(post_type, version=None) -> Dict:
+│   │                                          # hämtar schema via mgr.get_schema(post_type, version),
+│   │                                          # returnerar:
+│   │                                          # {
+│   │                                          #   post_type, name, total_length, field_count,
+│   │                                          #   fields:[{name,position,length,type,required,description}],
+│   │                                          #   version, checksum
+│   │                                          # }
+│   │                                          # eller {"error": "..."}
+│   │                                          # get_active_version() -> Optional[str]
+│   │                                          # list_versions() -> List[str]
+│   │                                          # refresh() -> None:
+│   │                                          # vidarebefordrar till widget.refresh() om widget finns
+│   │                                          # GUI (om PySide6 finns):
+│   │                                          # TSSpecViewerWidget(QWidget):
+│   │                                          # huvudwidget för schema-visning
+│   │                                          # init:
+│   │                                          # _setup_ui(),
+│   │                                          # QTimer.singleShot(100, self.refresh)
+│   │                                          # Tabs:
+│   │                                          # 1. Översikt
+│   │                                          # 2. Fältdetaljer
+│   │                                          # 3. Jämför versioner
+│   │                                          # _setup_ui():
+│   │                                          # titel "TS Schema Viewer",
+│   │                                          # QTabWidget med styling,
+│   │                                          # knappar längst ner:
+│   │                                          # Uppdatera -> refresh(),
+│   │                                          # Exportera JSON -> _export_json()
+│   │                                          # _create_overview_tab():
+│   │                                          # visar:
+│   │                                          # aktiv version,
+│   │                                          # antal posttyper,
+│   │                                          # totalt antal fält,
+│   │                                          # post_table med kolumner:
+│   │                                          # Posttyp/Namn/Fält/Längd,
+│   │                                          # versions_list med alla tillgängliga versioner
+│   │                                          # _create_details_tab():
+│   │                                          # dropdown för posttyp,
+│   │                                          # fields_table med kolumner:
+│   │                                          # Fältnamn/Position/Längd/Typ/Obligatorisk/Beskrivning
+│   │                                          # _create_compare_tab():
+│   │                                          # compare_v1_combo + compare_v2_combo,
+│   │                                          # knapp "Jämför",
+│   │                                          # compare_result QTextEdit för diffutskrift
+│   │                                          # refresh():
+│   │                                          # _refresh_overview(),
+│   │                                          # _refresh_post_types(),
+│   │                                          # _refresh_versions()
+│   │                                          # _refresh_overview():
+│   │                                          # hämtar aktiv version + alla scheman,
+│   │                                          # uppdaterar labels,
+│   │                                          # räknar total_fields,
+│   │                                          # fyller post_table med PTxx, namn, fältantal, total_length
+│   │                                          # _refresh_post_types():
+│   │                                          # fyller dropdown med "PT{pt} - {name}"
+│   │                                          # _refresh_versions():
+│   │                                          # uppdaterar versionslista,
+│   │                                          # markerar aktiv version med "→",
+│   │                                          # fyller compare-dropdowns,
+│   │                                          # väljer olika versioner om minst två finns
+│   │                                          # _on_post_type_changed(text):
+│   │                                          # läser currentData() som posttyp,
+│   │                                          # hämtar schema,
+│   │                                          # sorterar fields på position,
+│   │                                          # fyller fields_table
+│   │                                          # _do_compare():
+│   │                                          # hämtar v1/v2,
+│   │                                          # varnar om samma version,
+│   │                                          # använder viewer.compare_versions() eller manager fallback,
+│   │                                          # skriver textbaserat resultat:
+│   │                                          # added(+ PTxx), removed(- PTxx), modified(~ PTxx)
+│   │                                          # _export_json():
+│   │                                          # save dialog,
+│   │                                          # exporterar aktiv version + alla posttyper/fält till JSON:
+│   │                                          # {
+│   │                                          #   version,
+│   │                                          #   exported_at,
+│   │                                          #   post_types: {
+│   │                                          #     pt: {
+│   │                                          #       name,
+│   │                                          #       total_length,
+│   │                                          #       fields:[...]
+│   │                                          #     }
+│   │                                          #   }
+│   │                                          # }
+│   │                                          # visar QMessageBox vid lyckad/misslyckad export
+│   │                                          # Feature-sammanfattning:
+│   │                                          # visa aktiv schema-version,
+│   │                                          # visa posttyper,
+│   │                                          # visa detaljerade fält per posttyp,
+│   │                                          # jämföra två versioner,
+│   │                                          # exportera schemaöversikt till JSON
+│   │                                          # Begränsningar:
+│   │                                          # pluginen är viewer/inspector,
+│   │                                          # inte source of truth,
+│   │                                          # ändrar inte schema,
+│   │                                          # importerar inte schema själv,
+│   │                                          # fallbackdiff på modifierade posttyper är relativt grov
+│   │                                          # Beroenden i praktiken:
+│   │                                          # core/plugin_base.py,
+│   │                                          # ts_schema_manager för verklig nytta,
+│   │                                          # PySide6 för GUI
+│   ├── vehicle_registration_post/
+│   │   ├── __init__.py
+│   │   ├── plugin.py
+│   │   └── struktur.txt
+│   ├── vehicle_registry/
+│   │   ├── __init__.py
+│   │   ├── plugin.py
+│   │   └── Struktur.txt
+│   └── vin_tracking/
+│       ├── __init__.py
+│       ├── plugin.py
+│       └── struktur.txt
+├── ut/
+│   └── rapporter/
+├── xlsx/
+├── config.json
+├── main.py
+└── readme.txt
