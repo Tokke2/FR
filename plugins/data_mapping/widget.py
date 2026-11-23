@@ -339,8 +339,7 @@ class ExcelImportEngine:
         total = len(sheets)
         for idx, sheet in enumerate(sheets, 1):
             if progress_cb:
-                progress_cb(idx, total, sheet)
-                QApplication.processEvents()
+                progress_cb(idx - 1, total + 1, f"Läser blad {sheet} ({idx}/{total})")
             try:
                 df = pd.read_excel(xls, sheet_name=sheet, dtype=str).fillna("")
                 headers = [_normalize_header(str(c)) for c in df.columns]
@@ -354,7 +353,12 @@ class ExcelImportEngine:
             except Exception as exc:
                 sheet_info.append({"sheet": sheet, "rows": 0, "status": f"fel: {exc}"})
                 self._log(f"Blad {sheet} hoppades över: {exc}", "warning")
+            if progress_cb:
+                progress_cb(idx, total + 1, f"Bearbetat {idx} av {total} blad")
 
+        if progress_cb:
+            progress_cb(total, total + 1, "Sparar importerade rubriker...")
+        xls.close()
         # spara headers
         try:
             out_path = Path("data/mappings/imported_headers.json")
@@ -365,8 +369,11 @@ class ExcelImportEngine:
                 "headers": all_headers,
                 "sheet_info": sheet_info
             })
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log(f"Kunde inte spara importerade rubriker: {exc}", "warning")
+            raise RuntimeError(f"Kunde inte spara importerade rubriker: {exc}") from exc
+        if progress_cb:
+            progress_cb(total + 1, total + 1, "Importen är klar.")
 
         return all_headers, all_rows, sheet_info
 
@@ -550,17 +557,17 @@ class ImportTab(QWidget):
         if not p.exists():
             QMessageBox.warning(self, "Fil saknas", "Filen hittades inte.")
             return
-        self.progress.setVisible(True)
-        self.progress.setRange(0, 0)
-        QApplication.processEvents()
+        self.import_status_label.setText("Importerar...")
         try:
-            def prog_fn(i, total, sheet):
-                self.progress.setRange(0, total)
-                self.progress.setValue(i)
-                self.import_status_label.setText(f"Importerar {sheet} ({i}/{total})...")
-                QApplication.processEvents()
-
-            headers, rows, sheet_info = self._import_engine.import_file(p, progress_cb=prog_fn)
+            from plugins.main_gui.dialogs.task_progress import run_task
+            # Separat engine: callbacks på arbetstråden får inte röra GUI:t.
+            engine = ExcelImportEngine(
+                skip_sheets=list(SKIP_SHEETS_DEFAULT),
+                log_callback=lambda msg, level: _log.log(
+                    logging.WARNING if level == "warning" else logging.INFO, "%s", msg),
+            )
+            headers, rows, sheet_info = run_task(
+                self, "Excel-import", lambda progress: engine.import_file(p, progress_cb=progress))
             self._imported_headers = headers
             self._imported_rows = rows
             self._sheet_info = sheet_info
@@ -569,6 +576,10 @@ class ImportTab(QWidget):
             self.count_label.setText(f"{len(rows)} rader importerade, visar max 500")
             self.import_status_label.setText(f"Import klar: {Path(p).name} – {len(rows)} rader, {len(headers)} kolumner")
             self._log_cb(f"Import klar: {len(rows)} rader", "success")
+            failed_sheets = [entry for entry in sheet_info if entry["status"] != "ok"]
+            if failed_sheets:
+                QMessageBox.warning(self, "Import med varningar", "Följande blad kunde inte läsas:\n" +
+                                    "\n".join(f"{entry['sheet']}: {entry['status']}" for entry in failed_sheets))
 
             try:
                 self._on_headers_imported(headers)
@@ -803,7 +814,7 @@ class GenerateFilePage(QWidget):
         title.setObjectName("PageTitle")
         _set_bold(title)
         gen_layout.addWidget(title)
-        info = QLabel("Matchning och TS-generering körs via data_mapping plugin API.\nAnvänd Import → Mappning, sedan Generera via TS File Generator plugin.")
+        info = QLabel("TS-generering är tillfälligt spärrad tills postformaten har verifierats.\nIngen TS-fil kan skapas under tiden.")
         info.setWordWrap(True)
         info.setObjectName("StatusLabel")
         gen_layout.addWidget(info)

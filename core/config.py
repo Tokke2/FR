@@ -621,12 +621,23 @@ class Configuration:
     ) -> Dict[str, Any]:
         """Ladda och parsa JSON-fil."""
         try:
+            read_started = time.time()
             content = path.read_text(encoding=encoding)
+            original_content = content
 
             # Ta bort kommentarer (// och /* */)
             content = cls._strip_json_comments(content)
-
-            return json.loads(content)
+            parsed = json.loads(content)
+            # Endast ett lyckat parse-resultat för samma fil verifierar att
+            # just ett tidigare CONFIG_PARSE_ERROR har åtgärdats.
+            try:
+                from core.daily_logging import resolve_config_parse_error
+                from core.log_paths import app_log_dir
+                if path.read_text(encoding=encoding) == original_content:
+                    resolve_config_parse_error(app_log_dir(), path, started_at=read_started)
+            except Exception:
+                _log.exception("Kunde inte uppdatera status för verifierad felkod")
+            return parsed
 
         except json.JSONDecodeError as e:
             raise ConfigParseError(
@@ -1587,7 +1598,7 @@ class CoreConfigSchema(ConfigSchema):
     schema = {
         "app.name": ConfigField(
             type=str,
-            default="Transportstyrelsen Fordonsregistreringssystem",
+            default="Fordonsreg",
             description="Application name"
         ),
         "app.version": ConfigField(

@@ -27,7 +27,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -1007,119 +1006,18 @@ class Plugin(PluginBase):
         filepath: Optional[Path] = None,
         parent: Optional[QWidget] = None,
     ) -> Optional[ImportResult]:
-        """1. Importera från Excel-fil."""
-        try:
-            if filepath is None:
-                filepath_str, _ = QFileDialog.getOpenFileName(
-                    parent,
-                    "Välj Excel-fil med färger",
-                    str(self._get_data_dir()),
-                    "Excel-filer (*.xlsx *.xls *.xlsm);;Alla filer (*.*)",
-                )
-                if not filepath_str:
-                    return None
-                filepath = Path(filepath_str)
-
-            if not self.colors_service:
-                QMessageBox.warning(parent, "Fel", "colors_manager plugin ej tillgänglig")
-                return None
-
-            worker = ImportWorker([filepath], self)
-            batch_result = self._run_worker_sync(
-                worker=worker,
-                parent=parent,
-                label_text=f"Importerar {filepath.name}...",
-                maximum=1,
-            )
-            if not batch_result or not batch_result.results:
-                return None
-
-            result = batch_result.results[0]
-            self._import_history.append(result)
-            self._show_result_dialog(parent, result)
-
-            emit_event_safe(
-                self.app,
-                "colors:imported",
-                {
-                    "file": filepath.name,
-                    "imported": result.imported,
-                    "updated": result.updated,
-                    "errors": result.errors,
-                },
-            )
-            return result
-
-        except Exception as exc:
-            logger.exception("import_from_file failed: %s", exc)
-            return None
+        """Den äldre importen saknar säkra dubblettval och är spärrad."""
+        QMessageBox.warning(parent, "Färgimport pausad", "Den äldre färgimporten är spärrad tills dubbletter och PIN hanteras säkert. Inga färger har ändrats.")
+        return None
 
     def import_from_directory(
         self,
         directory: Optional[Path] = None,
         parent: Optional[QWidget] = None,
     ) -> Optional[BatchImportResult]:
-        """2. Batch-import från katalog."""
-        try:
-            if directory is None:
-                directory = self._get_data_dir()
-
-            files = self._find_color_files(directory)
-            if not files:
-                QMessageBox.information(
-                    parent,
-                    "Info",
-                    f"Inga färgfiler hittades i:\n{directory}\n\n"
-                    "Filnamnet måste innehålla 'färg', 'color' etc.",
-                )
-                return None
-
-            if not self.colors_service:
-                QMessageBox.warning(parent, "Fel", "colors_manager plugin ej tillgänglig")
-                return None
-
-            preview = "\n".join(f"• {f.name}" for f in files[:5])
-            if len(files) > 5:
-                preview += f"\n... +{len(files) - 5} fler"
-
-            reply = QMessageBox.question(
-                parent,
-                "Bekräfta import",
-                f"Importera {len(files)} färgfiler?\n\n{preview}",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                return None
-
-            worker = ImportWorker(files, self)
-            result = self._run_worker_sync(
-                worker=worker,
-                parent=parent,
-                label_text="Startar import...",
-                maximum=len(files),
-            )
-            if result is None:
-                return None
-
-            for file_result in result.results:
-                self._import_history.append(file_result)
-
-            self._show_batch_result_dialog(parent, result)
-            emit_event_safe(
-                self.app,
-                "colors:batch_imported",
-                {
-                    "files": len(files),
-                    "imported": result.total_imported,
-                    "updated": result.total_updated,
-                    "errors": result.total_errors,
-                },
-            )
-            return result
-
-        except Exception as exc:
-            logger.exception("import_from_directory failed: %s", exc)
-            return None
+        """Även batchimporten använder den osäkra äldre vägen."""
+        QMessageBox.warning(parent, "Färgimport pausad", "Den äldre färgimporten är spärrad tills dubbletter och PIN hanteras säkert. Inga färger har ändrats.")
+        return None
 
     def export_to_pdf(self, parent: Optional[QWidget] = None) -> Optional[Path]:
         """3. Exportera till PDF."""
@@ -1444,17 +1342,7 @@ class Plugin(PluginBase):
         Returnerar:
             (success, message, was_update)
         """
-        service = self.colors_service
-        if service is None:
-            return False, "colors_manager ej tillgänglig", False
-
-        existing = self._service_get_by_code(code)
-        if existing is not None:
-            updated = self._service_update_color(code=code, name=name, ts_code=ts_code)
-            return updated, "" if updated else "Kunde inte uppdatera befintlig färg", True
-
-        created = self._service_add_color(code=code, name=name, ts_code=ts_code)
-        return created, "" if created else "Kunde inte skapa färg", False
+        return False, "Äldre färgimport är spärrad: dubblettval och PIN-skydd kräver en säker importdialog.", False
 
     def _service_add_color(self, code: str, name: str, ts_code: str = "") -> bool:
         """Försök skapa färg via olika API-varianter."""
@@ -1630,14 +1518,19 @@ class Plugin(PluginBase):
             pass
 
     def _open_file(self, filepath: Path) -> None:
-        """Öppna fil med standardprogram."""
+        """Öppna fil med standardprogram – utan terminalfönster.
+
+        Tidigare användes ``cmd /c start`` på Windows, vilket öppnade ett
+        svart konsolfönster. QDesktopServices öppnar filen direkt i det
+        program filtypen är kopplad till.
+        """
         try:
-            if sys.platform == "win32":
-                subprocess.run(["cmd", "/c", "start", "", str(filepath)], check=False)
-            elif sys.platform == "darwin":
-                subprocess.run(["open", str(filepath)], check=False)
-            else:
-                subprocess.run(["xdg-open", str(filepath)], check=False)
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+
+            if QDesktopServices.openUrl(QUrl.fromLocalFile(str(filepath))):
+                return
+            logger.debug("Standardprogrammet kunde inte öppnas för %s", filepath)
         except Exception as exc:
             logger.debug("Could not open file: %s", exc)
 

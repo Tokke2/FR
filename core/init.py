@@ -98,7 +98,7 @@ def get_copyright_string() -> str:
 
 if sys.version_info < (3, 12):
     raise RuntimeError(
-        f"Transportstyrelsen Fordonsregistreringssystem kräver "
+        f"Fordonsreg kräver "
         f"Python 3.12+, du kör Python "
         f"{sys.version_info.major}.{sys.version_info.minor}"
     )

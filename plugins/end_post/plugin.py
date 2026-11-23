@@ -893,6 +893,10 @@ class Plugin(PluginBase):
                 - used_schema: bool
                 - error: Optional[str]
         """
+        from core.ts_safety import generation_block_reason
+        reason = generation_block_reason()
+        if reason:
+            return {"success": False, "error": reason}
         try:
             _log.info(
                 "Genererar slutpost (PT99) för %d poster...",

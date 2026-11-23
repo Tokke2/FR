@@ -79,7 +79,6 @@ import logging
 import logging.handlers
 import os
 import sys
-import tempfile
 import threading
 import time
 import traceback
@@ -87,6 +86,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Final, List, Optional, TypeVar
+from core.log_paths import app_log_dir
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -95,7 +95,7 @@ from typing import Any, Callable, Dict, Final, List, Optional, TypeVar
 VERSION: Final[str] = "2.0.0"
 AUTHOR: Final[str] = "Rickard Längkvist"
 
-LOGS_DIR: Final[str] = "logs"
+LOGS_DIR: Final[Path] = app_log_dir()
 MAX_LOG_SIZE: Final[int] = 5 * 1024 * 1024   # 5 MB per kategorilogg
 DEBUG_LOG_SIZE: Final[int] = 10 * 1024 * 1024  # 10 MB för debug.log
 BACKUP_COUNT: Final[int] = 3
@@ -257,19 +257,14 @@ _hooks_installed = False
 
 
 def _resolve_logs_dir() -> Path:
-    """Lös logs-katalog kraschsäkert med tempdir-fallback."""
+    """Använd appmappens loggkatalog, aldrig aktuell arbetskatalog eller temp."""
     logs_dir_path = Path(LOGS_DIR)
     try:
         logs_dir_path.mkdir(exist_ok=True, parents=True)
-        return logs_dir_path
-    except Exception as exc:
-        _bootstrap_report(f"Kunde inte skapa logs-katalog: {exc}")
-        fallback = Path(tempfile.gettempdir()) / "ts_vehicle_system_logs"
-        try:
-            fallback.mkdir(exist_ok=True, parents=True)
-        except Exception:
-            pass
-        return fallback
+    except OSError as exc:
+        _bootstrap_report(f"Kunde inte skapa loggkatalogen {logs_dir_path}: {exc}")
+        raise
+    return logs_dir_path
 
 
 def setup_logger(
@@ -312,7 +307,11 @@ def setup_logger(
             )
 
         logs_dir_path = _resolve_logs_dir()
-        log_path = logs_dir_path / log_file
+        # Även anrop med äldre anpassade sökvägar stannar i appens loggmapp.
+        filename = Path(log_file).name
+        if not filename or filename in {".", ".."}:
+            raise ValueError("Ogiltigt loggfilnamn")
+        log_path = logs_dir_path / filename
 
         try:
             # Återanvänd existerande handler för samma fil
@@ -410,6 +409,19 @@ def install_exception_hooks() -> None:
     except Exception as exc:
         _bootstrap_report(f"Kunde inte sätta threading.excepthook: {exc}")
 
+    # Undantag i t.ex. finalizers kan inte skickas till vanliga excepthook.
+    def _unraisable_hook(args):
+        root.error(
+            "OHANTERAT UNDANTAG (unraisable): %s",
+            args.err_msg or "exception i cleanup",
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    try:
+        sys.unraisablehook = _unraisable_hook
+    except Exception as exc:
+        _bootstrap_report(f"Kunde inte sätta sys.unraisablehook: {exc}")
+
     # Fånga Python-warnings -> logging (py.warnings -> root -> errors)
     try:
         logging.captureWarnings(True)
@@ -484,6 +496,20 @@ def setup_all_loggers(
             )
         except Exception as exc:
             _bootstrap_report(f"Kunde inte binda errors.log: {exc}")
+
+        # En separat felsökningslogg samlar även start- och uppdateringsfel.
+        try:
+            from core.error_summary import ErrorSummaryHandler
+            root_logger.addHandler(ErrorSummaryHandler(logs_dir_path, "app"))
+        except Exception as exc:
+            _bootstrap_report(f"Kunde inte binda felsokning.log: {exc}")
+
+        # Daglig kopia: gamla dagar arkiveras även om appen är öppen över midnatt.
+        try:
+            from core.daily_logging import DailyLogHandler
+            root_logger.addHandler(DailyLogHandler(logs_dir_path, "app", monitor=True))
+        except Exception as exc:
+            _bootstrap_report(f"Kunde inte starta dagsloggning: {exc}")
 
         # 5. Global allt-samlare (logs/debug.log) — DEBUG+ (NY v2.0.0)
         if debug_log_enabled:

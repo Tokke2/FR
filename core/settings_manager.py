@@ -94,7 +94,7 @@ def get_copyright_string() -> str:
 # SCHEMA v1 — defaults (källa: spec Sektion A + settings.json)
 DEFAULT_SETTINGS: Final[Dict[str, Any]] = {
     "schema_version": CURRENT_SCHEMA_VERSION,
-    "app_name": "Transportstyrelsen Fordonsregistreringssystem",
+    "app_name": "Fordonsreg",
     "startup": False,
     "start_minimized": True,
     "theme": "auto",

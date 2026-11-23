@@ -61,6 +61,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QTreeWidget, QTreeWidgetItem
 )
 
+from plugins.gui_helpers.page_header import PageHeader
 from core.plugin_base import PluginBase
 
 
@@ -265,7 +266,7 @@ class Plugin(PluginBase):
             try:
                 self._widget.refresh_all()
             except Exception as e:
-                self._local_logger.error(f"Refresh failed: {e}")
+                self._local_logger.error(f"Uppdatering misslyckades: {e}")
     
     def _on_show_tab(self, data: Optional[Dict] = None) -> None:
         """Visa specifik flik. KRASCHSÄKER."""
@@ -602,7 +603,8 @@ class Plugin(PluginBase):
         
         try:
             # Försök läsa audit.log
-            log_path = Path(getattr(self.app, 'base_path', '.')) / "logs" / "audit.log"
+            from core.log_paths import app_log_dir
+            log_path = app_log_dir() / "audit.log"
             if log_path.exists():
                 with open(log_path, 'r', encoding='utf-8') as f:
                     lines = f.readlines()[-limit:]
@@ -679,7 +681,7 @@ class Plugin(PluginBase):
             try:
                 self._widget.refresh_all()
             except Exception as e:
-                self._local_logger.error(f"Refresh failed: {e}")
+                self._local_logger.error(f"Uppdatering misslyckades: {e}")
     
     def get_selected_vehicle(self) -> Optional[Dict]:
         """Hämta valt fordon. KRASCHSÄKER."""
@@ -717,10 +719,11 @@ class DataViewerWidget(QWidget):
             # Header
             header = QHBoxLayout()
             
-            title = QLabel("📋 Datavisning")
-            title.setObjectName("PageTitle")
-            title.setStyleSheet("font-size: 22px; font-weight: bold; color: #ffffff;")
-            header.addWidget(title)
+            # Samma sidhuvud som övriga sidor (förslag 5) – ingen egen
+            # teckenstorlek eller hårdkodad färg som bryter mot temat.
+            header.addWidget(PageHeader.build(
+                "Datavisning", "table",
+                "Alla registrerade fordon med filter och export", self))
             
             header.addStretch()
             
@@ -803,7 +806,7 @@ class DataViewerWidget(QWidget):
                 if hasattr(tab, 'refresh'):
                     tab.refresh()
             except Exception as e:
-                logger.warning(f"Failed to refresh {name}: {e}")
+                logger.warning(f"Kunde inte uppdatera {name}: {e}")
     
     def refresh_schema_tab(self) -> None:
         """Uppdatera schema-flik. KRASCHSÄKER."""
@@ -1065,7 +1068,7 @@ class VehiclesTab(QWidget):
             self.status_label.setText("❌ Ingen datakälla")
             
         except Exception as e:
-            logger.error(f"Refresh failed: {e}")
+            logger.error(f"Uppdatering misslyckades: {e}")
             self.status_label.setText(f"❌ Fel: {e}")
     
     def _apply_filters(self) -> None:
@@ -1432,7 +1435,7 @@ class DealersViewTab(QWidget):
             self.status_label.setText(f"✅ {len(self._data)} återförsäljare")
             
         except Exception as e:
-            logger.error(f"Refresh failed: {e}")
+            logger.error(f"Uppdatering misslyckades: {e}")
             self.status_label.setText(f"❌ Fel: {e}")
     
     def _update_table(self) -> None:
@@ -1634,7 +1637,7 @@ class ColorsViewTab(QWidget):
             self.status_label.setText(f"✅ {len(self._data)} färger")
             
         except Exception as e:
-            logger.error(f"Refresh failed: {e}")
+            logger.error(f"Uppdatering misslyckades: {e}")
             self.status_label.setText(f"❌ Fel: {e}")
     
     def _update_table(self) -> None:
@@ -1859,7 +1862,7 @@ class VinsTab(QWidget):
             self.stats_label.setText(f"Totalt: {total} registrerade VIN")
             
         except Exception as e:
-            logger.error(f"Refresh failed: {e}")
+            logger.error(f"Uppdatering misslyckades: {e}")
     
     def _on_year_selected(self) -> None:
         """Visa månader för valt år. KRASCHSÄKER."""

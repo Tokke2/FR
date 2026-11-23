@@ -709,6 +709,7 @@ class LoggerFactory:
         # Hantera datum i filnamn
         if config.date_in_filename:
             date_str = datetime.now().strftime(config.date_in_filename)
+            date_str = date_str.replace("/", "-").replace("\\", "-")
             log_file = log_file.parent / f"{log_file.stem}_{date_str}{log_file.suffix}"
         
         # Skapa handler
@@ -1011,7 +1012,8 @@ class Plugin(PluginBase):
     @property
     def log_dir(self) -> Path:
         """Returnerar loggmappen."""
-        return self._paths.get("logs", Path("logs"))
+        from core.log_paths import app_log_dir
+        return self._paths.get("logs", app_log_dir())
     
     @property
     def copyright(self) -> str:
@@ -1076,30 +1078,12 @@ class Plugin(PluginBase):
         self._initialized = False
     
     def _setup_paths(self) -> None:
-        """Konfigurera sökvägar."""
-        base_dir = Path(".")
-        
-        # Försök hämta base_dir från app
-        if self.app:
-            if hasattr(self.app, 'base_path'):
-                base_dir = Path(self.app.base_path) if self.app.base_path else base_dir
-            elif hasattr(self.app, 'config'):
-                try:
-                    if hasattr(self.app.config, 'get'):
-                        base_dir = Path(self.app.config.get("base_dir", "."))
-                    elif isinstance(self.app.config, dict):
-                        base_dir = Path(self.app.config.get("base_dir", "."))
-                except Exception:
-                    pass
-        
-        self._paths = {
-            "base": base_dir,
-            "logs": base_dir / "logs",
-        }
-        
-        # Skapa loggmapp
-        self._paths["logs"].mkdir(parents=True, exist_ok=True)
-    
+        """Alla tekniska loggfiler ligger i appmappens logs-undermapp."""
+        from core.log_paths import app_log_dir
+        log_dir = app_log_dir()
+        self._paths = {"base": log_dir.parent, "logs": log_dir}
+        log_dir.mkdir(parents=True, exist_ok=True)
+
     def _load_config(self) -> None:
         """Ladda konfiguration från app config."""
         app_config: Dict[str, Any] = {}
@@ -1368,7 +1352,14 @@ class Plugin(PluginBase):
         # Sätt default log_file om inte angiven
         if config.log_file is None:
             safe_name = config.name.replace(" ", "_").replace(".", "_").lower()
-            config.log_file = self.log_dir / f"{safe_name}.log"
+            filename = Path(f"{safe_name}.log").name
+        else:
+            # Även separat konfigurerade loggerfiler ska ligga i appens
+            # loggmapp. En äldre absolut sökväg ändras inte eller raderas.
+            filename = Path(config.log_file).name
+        if not filename or filename in {".", ".."}:
+            raise ValueError("Ogiltigt loggfilnamn")
+        config.log_file = self.log_dir / filename
         
         # Skapa via factory
         logger = LoggerFactory.create_logger(config, reset)

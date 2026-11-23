@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # main.py
 """
-Filregistrering — Fordonsfilregistreringssystem
+Fordonsreg — Fordonsfilregistreringssystem
 Huvudentry för utvecklingsläge (med terminal).
 Detta är den primära entry pointen under utveckling.
 För produktion används main.pyw (ingen terminal).
@@ -57,6 +57,22 @@ Python: 3.12+
 Author: Rickard Längkvist
 """
 from __future__ import annotations
+
+# Vanlig GUI-start går via startkontrollen innan Qt eller plugins importeras.
+# Diagnostik och headless-tester ska däremot fungera utan GUI-beroenden.
+if __name__ == "__main__":
+    import os as _bootstrap_os
+    import runpy as _bootstrap_runpy
+    import sys as _bootstrap_sys
+    from pathlib import Path as _BootstrapPath
+
+    _diagnostic_options = {"--plugins-only", "--validate-config", "--headless",
+                           "--help", "-h", "--version", "-v"}
+    if (_bootstrap_os.environ.get("FR_PREFLIGHT_DONE") != "1"
+            and _diagnostic_options.isdisjoint(_bootstrap_sys.argv[1:])):
+        _launcher = _BootstrapPath(__file__).resolve().with_name("start.pyw")
+        _bootstrap = _bootstrap_runpy.run_path(str(_launcher), run_name="filregistrering_start")
+        _bootstrap_sys.exit(_bootstrap["main"]())
 import sys
 import os
 import signal
@@ -70,10 +86,36 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 VERSION = "1.0.2"
 AUTHOR = "Rickard Längkvist"
-APP_NAME = "Filregistrering"
+APP_NAME = "Fordonsreg"
 _log = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
+# Ingen terminal ska synas, även om appen startats med python.exe.
+# Konsolfönstret döljs innan Qt, loggning eller plugin laddas.
+try:
+    from core.no_console import hide_console_window
+    hide_console_window()
+except Exception:
+    pass  # Startkontrollen rapporterar fel även utan denna hjälpare.
+# Fånga tidiga fel innan det ordinarie loggsystemet är konfigurerat.
+try:
+    from core.error_summary import ErrorSummaryHandler
+    logging.getLogger().addHandler(ErrorSummaryHandler(PROJECT_ROOT / "logs", "app-start"))
+    def _early_exception_hook(exc_type, exc_value, exc_tb):
+        if not issubclass(exc_type, KeyboardInterrupt):
+            logging.getLogger(__name__).critical(
+                "Ohanterat fel under tidig appstart", exc_info=(exc_type, exc_value, exc_tb)
+            )
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+    sys.excepthook = _early_exception_hook
+except Exception:
+    pass  # Startkontrollen rapporterar processfel även om felloggen inte kan initieras.
+# Även tidiga programfelkoder och loggposter ska följa datumarkiveringen.
+try:
+    from core.daily_logging import DailyLogHandler
+    logging.getLogger().addHandler(DailyLogHandler(PROJECT_ROOT / "logs", "app-start"))
+except Exception:
+    pass
 from core.event_bus import EventBus
 from core.plugin_base import PluginBase
 from core.plugin_loader import PluginLoader, LoadResult, LoadState
@@ -296,6 +338,12 @@ class Application:
                 _log.info(
                     "Created default config at %s", self._config_path,
                 )
+            # Migrera bara tidigare standardnamn i minnet; rör inte användarens fil.
+            from core.branding import display_name
+            current_name = self.config.get_str("app_name", self.APP_NAME)
+            new_name = display_name(current_name)
+            if new_name != current_name:
+                self.config.set("app_name", new_name, emit_event=False)
             try:
                 load_config.__globals__["_global_config"] = self.config
             except Exception as exc:
@@ -311,7 +359,6 @@ class Application:
             "paths.vehicles_dir",
             "paths.dispatch_dir",
             "paths.output_dir",
-            "paths.logs_dir",
             "paths.cache_dir",
             "paths.mappings_dir",
         ]
@@ -408,6 +455,8 @@ class Application:
         """Initiera Qt Application."""
         if self._headless:
             return
+        from core.branding import set_windows_app_id
+        set_windows_app_id()
         from PySide6.QtWidgets import QApplication
         self._qapp = QApplication.instance()
         if not self._qapp:
@@ -415,6 +464,8 @@ class Application:
         self._qapp.setApplicationName(
             self.config.get_str("app_name", self.APP_NAME)
         )
+        from plugins.app_icon.plugin import set_application_icon
+        set_application_icon(self._project_root)
         self._qapp.setApplicationVersion(self.VERSION)
         self._qapp.setOrganizationName(
             self.config.get_str("app_author", self.AUTHOR)
@@ -431,7 +482,7 @@ class Application:
         if self._headless:
             return True
         main_gui = self.get_plugin("main_gui")
-        if main_gui and hasattr(main_gui, "main_window"):
+        if main_gui and getattr(main_gui, "main_window", None) is not None:
             self.main_window = main_gui.main_window
             return True
         results = self.event_bus.emit_collect("app:get_main_window")
@@ -765,7 +816,8 @@ def _setup_basic_stderr_logging() -> None:
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     root = logging.getLogger()
-    if not root.handlers:
+    if not any(not (getattr(h, "_fordonsreg_summary_handler", False)
+                    or getattr(h, "_fordonsreg_archive_handler", False)) for h in root.handlers):
         root.addHandler(handler)
         root.setLevel(logging.INFO)
 
@@ -785,11 +837,15 @@ def main() -> int:
         headless=args.headless,
     )
     if not app._setup_single_instance():
+        if app.single_instance.error:
+            _log.error("Starten avbröts: %s", app.single_instance.error)
+            return 1
         _log.info(
             "Another instance is already running; focusing it"
         )
         try:
-            app.single_instance.focus_existing()
+            if not app.single_instance.focus_existing():
+                return 1
         except Exception as exc:
             _log.error("Could not focus existing instance: %s", exc)
         return 0
@@ -797,6 +853,8 @@ def main() -> int:
         exit_code = asyncio.run(app.start())
     except KeyboardInterrupt:
         exit_code = 130
+    finally:
+        app.single_instance.release()
     return exit_code
 
 if __name__ == "__main__":

@@ -11,8 +11,8 @@ Konverterad från: Script/db_config.py + Script/import_aterforsaljare.py
 
 ANSVAR:
   - CRUD för återförsäljare (JSON-lagring, atomisk skrivning)
-  - Excel-import via excel_reader.py (header-detektering, synonym-matchning)
-  - Lösenordsskydd via password_manager.py (SHA-256 + salt)
+  - Gemensam filimport med mappning och verifierad säkerhetskopia
+  - Ändringar kräver separat PIN; tidigare lösenordsfil lämnas orörd
   - GUI-widget med sökning, tabell, knappar
   - Event-driven integration via event_bus
   - Kraschsäkra publika API-metoder
@@ -88,6 +88,10 @@ from PySide6.QtWidgets import (
 )
 
 from core.plugin_base import PluginBase
+from plugins.gui_helpers.page_header import PageHeader
+from core.dealer_storage import DealerStorage
+from core.dealer_fields import FIELDS
+from core.dealer_pin import DealerPin, PIN_FILENAME
 
 # ── ANPASSADE IMPORTVÄGAR (matchar befintlig mappstruktur) ──
 # dealers_manager/
@@ -129,6 +133,8 @@ PLUGIN_AUTHOR: Final[str] = "Rickard Längkvist"
 PLUGIN_COPYRIGHT: Final[str] = (
     f"Copyright © {datetime.now().year} Rickard Längkvist"
 )
+
+_NO_SNAPSHOT = object()
 
 JSON_FILENAME: Final[str] = "aterforsaljare.json"
 PASSWORD_FILENAME: Final[str] = "aterforsaljare_password.json"
@@ -219,7 +225,8 @@ class DealersTableModel(QAbstractTableModel):
       data(index, role)       -> Any
     """
 
-    HEADERS: Final[List[str]] = ["Dealer Number", "Namn", "Org.nr"]
+    HEADERS: Final[List[str]] = list(FIELDS.values())
+    KEYS: Final[List[str]] = list(FIELDS)
     COL_DN: Final[int] = 0
     COL_NAMN: Final[int] = 1
     COL_ORGNR: Final[int] = 2
@@ -276,13 +283,13 @@ class DealersTableModel(QAbstractTableModel):
 
         dealer = self._data[row]
 
-        if role == Qt.ItemDataRole.DisplayRole:
-            if col == self.COL_DN:
-                return str(dealer.get("dealer_number", dealer.get("dn", "")))
-            if col == self.COL_NAMN:
-                return str(dealer.get("namn", ""))
-            if col == self.COL_ORGNR:
-                return str(dealer.get("orgnr", ""))
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
+            if 0 <= col < len(self.KEYS):
+                key = self.KEYS[col]
+                value = dealer.get(key, dealer.get("dn", "") if key == "dealer_number" else "")
+                text = "" if value is None else str(value)
+                # Visa alla rader på en rad; tooltip behåller originaltexten.
+                return " ↵ ".join(text.splitlines()) if role == Qt.ItemDataRole.DisplayRole else text
 
         if role == Qt.ItemDataRole.TextAlignmentRole:
             if col == self.COL_DN:
@@ -376,6 +383,13 @@ class Plugin(PluginBase):
                 "Fel vid initiering av %s: %s",
                 PLUGIN_NAME, exc, exc_info=True,
             )
+            raise
+
+    def create_widget(self, parent: QWidget) -> Optional[QWidget]:
+        """Huvudfönstrets standardkontrakt för en pluginsida."""
+        if self._json_path is None:
+            raise RuntimeError("Återförsäljarregistret är inte initierat")
+        return self.register_ui(parent)
 
     def register_ui(self, parent: QWidget) -> Optional[QWidget]:
         """
@@ -427,82 +441,37 @@ class Plugin(PluginBase):
     # PUBLIKT API – CRUD
     # ──────────────────────────────────────────────────────────────────────
 
+    def _storage(self) -> DealerStorage:
+        if self._json_path is None:
+            raise RuntimeError("Återförsäljarregistret är inte initierat")
+        return DealerStorage(self._json_path)
+
+    def dealer_pin(self) -> DealerPin:
+        if self._json_path is None:
+            raise RuntimeError("Återförsäljarregistret är inte initierat")
+        return DealerPin(self._json_path.parent / PIN_FILENAME)
+
     def load_from_json(self) -> List[Dict[str, Any]]:
-        """
-        Läs återförsäljare från JSON-fil.
+        """Läs alla poster; läsfel får inte förväxlas med ett tomt register."""
+        return self._storage().snapshot()[0]
 
-        Returns:
-            Lista med återförsäljare-dict. Tom lista vid fel eller saknad fil.
-        """
+    def save_to_json(self, data, *, expected=_NO_SNAPSHOT, pin=None) -> bool:
+        """Spara atomiskt efter verifierad säkerhetskopia och läskontroll."""
         try:
-            if not self._json_path or not self._json_path.exists():
-                _log.debug("JSON-fil saknas: %s", self._json_path)
-                return []
-
-            raw = self._read_json(self._json_path)
-
-            if isinstance(raw, dict):
-                result = [raw]
-            elif isinstance(raw, list):
-                result = [x for x in raw if isinstance(x, dict)]
-            else:
-                _log.warning(
-                    "Oväntat JSON-format i %s", self._json_path
-                )
-                return []
-
-            _log.debug("Laddade %d återförsäljare från JSON", len(result))
-            return result
-
-        except Exception as exc:
-            _log.error(
-                "Fel vid läsning av återförsäljare: %s",
-                exc, exc_info=True,
-            )
-            return []
-
-    def save_to_json(
-        self,
-        data: Union[List[Dict[str, Any]], Dict[str, Any]],
-    ) -> bool:
-        """
-        Spara återförsäljare till JSON-fil (atomiskt).
-
-        Args:
-            data: Lista eller enskild dict
-
-        Returns:
-            True vid framgång, False vid fel
-
-        Emittar:
-            dealers.saved
-        """
-        try:
+            if not self.dealer_pin().verify(pin):
+                raise PermissionError("PIN krävs för att ändra återförsäljarregistret")
             if isinstance(data, dict):
-                data_list: List[Dict[str, Any]] = [data]
-            elif isinstance(data, list):
-                data_list = [x for x in data if isinstance(x, dict)]
-            else:
-                _log.error("Ogiltigt data-format: %s", type(data))
-                return False
-
-            if not self._json_path:
-                _log.error("json_path ej satt – kan inte spara")
-                return False
-
-            self._write_json(self._json_path, data_list)
-            _log.info(
-                "Sparade %d återförsäljare till %s",
-                len(data_list), self._json_path,
-            )
-            self._emit_safe("dealers.saved", {"count": len(data_list)})
+                data = [data]
+            if not isinstance(data, list) or any(not isinstance(row, dict) for row in data):
+                raise ValueError("Alla återförsäljarposter måste vara objekt")
+            store = self._storage()
+            if expected is _NO_SNAPSHOT:
+                _, expected = store.snapshot()
+            store.save(data, expected)
+            self._emit_safe("dealers.saved", {"count": len(data)})
             return True
-
         except Exception as exc:
-            _log.error(
-                "Fel vid sparande av återförsäljare: %s",
-                exc, exc_info=True,
-            )
+            _log.error("Kunde inte spara återförsäljare: %s", exc, exc_info=True)
             return False
 
     def get_all_dealers(self) -> List[Dict[str, Any]]:
@@ -513,171 +482,96 @@ class Plugin(PluginBase):
             _log.error("Fel i get_all_dealers: %s", exc, exc_info=True)
             return []
 
+    @staticmethod
+    def _dn(dealer: Dict[str, Any]) -> str:
+        return str(dealer.get("dealer_number", dealer.get("dn", ""))).strip().upper()
+
     def get_by_dn(self, dn: str) -> Optional[Dict[str, Any]]:
-        """
-        Hämta återförsäljare med specifikt dealer number.
-
-        Args:
-            dn: Dealer number (case-insensitive)
-
-        Returns:
-            Dict eller None om ej hittad
-        """
         try:
-            target = dn.strip().upper()
-            for dealer in self.load_from_json():
-                candidate = str(
-                    dealer.get("dealer_number", dealer.get("dn", ""))
-                ).strip().upper()
-                if candidate == target:
-                    return dealer
-            return None
-        except Exception as exc:
-            _log.error("Fel i get_by_dn(%s): %s", dn, exc, exc_info=True)
+            target = str(dn).strip().upper()
+            matches = [row for row in self.load_from_json() if target and self._dn(row) == target]
+            if len(matches) != 1:
+                if len(matches) > 1:
+                    _log.warning("Flera återförsäljare har dealernummer %s; ändring spärras", target)
+                return None
+            return matches[0]
+        except Exception:
+            _log.exception("Kunde inte läsa återförsäljaren")
             return None
 
-    def add_dealer(self, dealer_data: Dict[str, Any]) -> bool:
-        """
-        Lägg till ny återförsäljare. Förhindrar dubbletter på DN.
-
-        Args:
-            dealer_data: Dict med dealer_number, namn, orgnr
-
-        Returns:
-            True om tillagd, False om duplikat eller fel
-
-        Emittar:
-            dealers.added
-        """
+    def add_dealer(self, dealer_data: Dict[str, Any], *, pin=None) -> bool:
         try:
-            dn = str(
-                dealer_data.get("dealer_number", dealer_data.get("dn", ""))
-            ).strip().upper()
-
-            if not dn:
-                _log.warning("Försökte lägga till ÅF utan dealer_number")
+            dn = self._dn(dealer_data)
+            name = str(dealer_data.get("namn", "")).strip()
+            if not dn or not name:
                 return False
-
-            namn = str(dealer_data.get("namn", "")).strip()
-            if not namn:
-                _log.warning("Försökte lägga till ÅF utan namn")
+            records, snapshot = self._storage().snapshot()
+            if any(self._dn(row) == dn for row in records):
+                _log.warning("Dealernummer %s finns redan", dn)
                 return False
-
-            dealers = self.load_from_json()
-            for existing in dealers:
-                existing_dn = str(
-                    existing.get("dealer_number", existing.get("dn", ""))
-                ).strip().upper()
-                if existing_dn == dn:
-                    _log.warning("ÅF med DN %s finns redan", dn)
-                    return False
-
-            normalized: Dict[str, Any] = {
-                "dealer_number": dn,
-                "namn": namn,
-                "orgnr": str(dealer_data.get("orgnr", "")).strip(),
-            }
-            dealers.append(normalized)
-
-            if self.save_to_json(dealers):
-                _log.info("Lade till ÅF: %s (%s)", namn, dn)
-                self._emit_safe("dealers.added", {"dn": dn, "namn": namn})
-                self.sync_to_db(dealers)
-                return True
+            row = {key: str(dealer_data.get(key, "")).strip() for key in FIELDS if key in dealer_data}
+            row.update({"dealer_number": dn, "namn": name})
+            records.append(row)
+            if not self.save_to_json(records, expected=snapshot, pin=pin):
+                return False
+            self._emit_safe("dealers.added", {"dn": dn, "namn": name})
+            return True
+        except Exception:
+            _log.exception("Kunde inte lägga till återförsäljare")
             return False
 
-        except Exception as exc:
-            _log.error("Fel i add_dealer: %s", exc, exc_info=True)
-            return False
-
-    def update_dealer(
-        self, dn: str, updated_data: Dict[str, Any]
-    ) -> bool:
-        """
-        Uppdatera befintlig återförsäljare.
-
-        Args:
-            dn:           Dealer number att uppdatera
-            updated_data: Nya fältvärden (namn, orgnr etc.)
-
-        Returns:
-            True vid framgång, False om ej hittad eller fel
-
-        Emittar:
-            dealers.updated
-        """
+    def update_dealer(self, dn: str, updated_data: Dict[str, Any], *, expected_record=None, pin=None) -> bool:
         try:
-            target = dn.strip().upper()
-            dealers = self.load_from_json()
-            found = False
-
-            for i, dealer in enumerate(dealers):
-                existing_dn = str(
-                    dealer.get("dealer_number", dealer.get("dn", ""))
-                ).strip().upper()
-                if existing_dn == target:
-                    dealers[i].update(updated_data)
-                    dealers[i]["dealer_number"] = target
-                    found = True
-                    break
-
-            if not found:
-                _log.warning(
-                    "ÅF med DN %s hittades inte för uppdatering", dn
-                )
+            target = str(dn).strip().upper()
+            records, snapshot = self._storage().snapshot()
+            matches = [i for i, row in enumerate(records) if target and self._dn(row) == target]
+            if len(matches) != 1:
+                _log.warning("Dealernumret saknas eller är inte entydigt: %s", target)
                 return False
-
-            if self.save_to_json(dealers):
-                _log.info("Uppdaterade ÅF: %s", dn)
-                self._emit_safe("dealers.updated", {"dn": dn})
-                return True
+            index = matches[0]
+            if expected_record is not None and records[index] != expected_record:
+                _log.warning("Återförsäljaren ändrades medan dialogen var öppen")
+                return False
+            name = str(updated_data.get("namn", "")).strip()
+            new_dn = self._dn(updated_data) if ("dealer_number" in updated_data or "dn" in updated_data) else target
+            if not name or not new_dn:
+                return False
+            if any(i != index and self._dn(row) == new_dn for i, row in enumerate(records)):
+                _log.warning("Det nya dealernumret finns redan")
+                return False
+            changes = {key: str(updated_data[key]).strip() for key in FIELDS
+                       if key in updated_data and key != "dealer_number"}
+            changes.update({"dealer_number": new_dn, "namn": name})
+            if "dn" in records[index] and new_dn != target:
+                changes["dn"] = new_dn  # äldre format: håll aliaset konsekvent
+            records[index] = {**records[index], **changes}
+            if not self.save_to_json(records, expected=snapshot, pin=pin):
+                return False
+            self._emit_safe("dealers.updated", {"dn": target})
+            return True
+        except Exception:
+            _log.exception("Kunde inte uppdatera återförsäljare")
             return False
 
-        except Exception as exc:
-            _log.error(
-                "Fel i update_dealer(%s): %s", dn, exc, exc_info=True
-            )
-            return False
-
-    def delete_dealer(self, dn: str) -> bool:
-        """
-        Ta bort återförsäljare med angivet dealer number.
-
-        Args:
-            dn: Dealer number
-
-        Returns:
-            True om borttagen, False om ej hittad eller fel
-
-        Emittar:
-            dealers.deleted
-        """
+    def delete_dealer(self, dn: str, *, expected_record=None, pin=None) -> bool:
         try:
-            target = dn.strip().upper()
-            dealers = self.load_from_json()
-            original_count = len(dealers)
-
-            dealers = [
-                d for d in dealers
-                if str(
-                    d.get("dealer_number", d.get("dn", ""))
-                ).strip().upper() != target
-            ]
-
-            if len(dealers) == original_count:
-                _log.warning("ÅF med DN %s hittades inte", dn)
+            target = str(dn).strip().upper()
+            records, snapshot = self._storage().snapshot()
+            matches = [i for i, row in enumerate(records) if target and self._dn(row) == target]
+            if len(matches) != 1:
+                _log.warning("Dealernumret saknas eller är inte entydigt: %s", target)
                 return False
-
-            if self.save_to_json(dealers):
-                _log.info("Tog bort ÅF med DN: %s", dn)
-                self._emit_safe("dealers.deleted", {"dn": dn})
-                return True
-            return False
-
-        except Exception as exc:
-            _log.error(
-                "Fel i delete_dealer(%s): %s", dn, exc, exc_info=True
-            )
+            index = matches[0]
+            if expected_record is not None and records[index] != expected_record:
+                _log.warning("Återförsäljaren ändrades före borttagning")
+                return False
+            records.pop(index)
+            if not self.save_to_json(records, expected=snapshot, pin=pin):
+                return False
+            self._emit_safe("dealers.deleted", {"dn": target})
+            return True
+        except Exception:
+            _log.exception("Kunde inte ta bort återförsäljare")
             return False
 
     def get_count(self) -> int:
@@ -688,189 +582,19 @@ class Plugin(PluginBase):
             _log.error("Fel i get_count: %s", exc, exc_info=True)
             return 0
 
-    def sync_to_db(
-        self,
-        dealers: Optional[List[Dict[str, Any]]] = None,
-    ) -> int:
-        """
-        Synkronisera återförsäljare till databas via core_database plugin.
-
-        Args:
-            dealers: Lista att synka. Laddar från JSON om None.
-
-        Returns:
-            Antal synkade poster. 0 om DB saknas eller fel.
-
-        Emittar:
-            dealers.synced
-        """
-        try:
-            if dealers is None:
-                dealers = self.load_from_json()
-
-            db = self._get_plugin_safe("core_database")
-            if not db:
-                _log.debug("core_database saknas – hoppar DB-sync")
-                return 0
-
-            count = 0
-            with db.get_connection() as conn:
-                cur = conn.cursor()
-                for dealer in dealers:
-                    dn = str(
-                        dealer.get("dealer_number", dealer.get("dn", ""))
-                    ).strip()
-                    namn = str(dealer.get("namn", "")).strip()
-                    orgnr = str(dealer.get("orgnr", "")).strip()
-
-                    if not dn or not namn:
-                        continue
-
-                    cur.execute(
-                        """INSERT OR REPLACE INTO "aterforsaljare"
-                           (dn, namn, orgnr, updated_at)
-                           VALUES (?, ?, ?, CURRENT_TIMESTAMP)""",
-                        (dn, namn, orgnr),
-                    )
-                    count += 1
-                conn.commit()
-
-            _log.info("Synkade %d ÅF till DB", count)
-            self._emit_safe("dealers.synced", {"count": count})
-            return count
-
-        except Exception as exc:
-            _log.error("Fel i sync_to_db: %s", exc, exc_info=True)
-            return 0
+    def sync_to_db(self, dealers: Optional[List[Dict[str, Any]]] = None) -> int:
+        """Spärrad: den gamla databassynken ersatte rader utan säkerhetskopia."""
+        _log.warning("Databassynk av återförsäljare är spärrad tills den kan göras säkert")
+        return 0
 
     # ──────────────────────────────────────────────────────────────────────
     # EXCEL-IMPORT (via import_logic/excel_reader.py)
     # ──────────────────────────────────────────────────────────────────────
 
-    def import_from_excel(
-        self,
-        filepath: Optional[str] = None,
-        parent: Optional[QWidget] = None,
-    ) -> Dict[str, Any]:
-        """
-        Importera återförsäljare från Excel-fil.
-
-        Använder import_logic.excel_reader.read_excel_with_header_detection()
-        för automatisk header-detektering (strategi 1–4).
-        Kolumnmatchning via import_logic/synonyms.py.
-
-        Args:
-            filepath: Sökväg till Excel-fil. Öppnar filväljare om None.
-            parent:   Förälder för dialoger
-
-        Returns:
-            Dict med:
-              success:           bool
-              total_imported:    int
-              processed_sheets:  List[str]
-              skipped_sheets:    List[str]
-              error:             Optional[str]
-
-        Emittar:
-            dealers.imported
-        """
-        result: Dict[str, Any] = {
-            "success": False,
-            "total_imported": 0,
-            "processed_sheets": [],
-            "skipped_sheets": [],
-            "error": None,
-        }
-
-        try:
-            if not PANDAS_AVAILABLE:
-                result["error"] = (
-                    "pandas saknas – pip install pandas openpyxl"
-                )
-                _log.error(result["error"])
-                return result
-
-            if not filepath:
-                chosen, _ = QFileDialog.getOpenFileName(
-                    parent,
-                    "Välj Excel-fil med återförsäljare",
-                    "",
-                    "Excel-filer (*.xlsx *.xls);;Alla filer (*.*)",
-                )
-                if not chosen:
-                    result["error"] = "Ingen fil vald"
-                    return result
-                filepath = chosen
-
-            path = Path(filepath)
-            if not path.exists():
-                result["error"] = f"Filen finns inte: {path}"
-                _log.error(result["error"])
-                return result
-
-            engine = get_excel_engine(path)
-            if not engine:
-                result["error"] = (
-                    f"Filformatet stöds ej eller saknar engine: "
-                    f"{path.suffix}"
-                )
-                _log.error(result["error"])
-                return result
-
-            _log.info(
-                "Importerar Excel: %s (engine=%s)", path.name, engine
-            )
-
-            xls = pd.ExcelFile(path, engine=engine)
-            imported_records: List[Dict[str, Any]] = []
-
-            for sheet_name in xls.sheet_names:
-                if sheet_name.strip().lower() in SKIP_SHEETS:
-                    result["skipped_sheets"].append(
-                        f"{sheet_name} (hoppad)"
-                    )
-                    _log.debug("Hoppar blad: %s", sheet_name)
-                    continue
-
-                sheet_result = self._process_excel_sheet(
-                    xls, sheet_name
-                )
-
-                if sheet_result["skipped"]:
-                    result["skipped_sheets"].append(
-                        f"{sheet_name} ({sheet_result['reason']})"
-                    )
-                    continue
-
-                imported_records.extend(sheet_result["records"])
-                result["processed_sheets"].append(
-                    f"{sheet_name} "
-                    f"({len(sheet_result['records'])} rader)"
-                )
-                result["total_imported"] += len(sheet_result["records"])
-
-            if imported_records:
-                self._merge_dealers(imported_records)
-                _log.info(
-                    "Import klar: %d poster från %d blad",
-                    result["total_imported"],
-                    len(result["processed_sheets"]),
-                )
-
-            result["success"] = True
-            self._emit_safe(
-                "dealers.imported",
-                {
-                    "count": result["total_imported"],
-                    "file": str(path.name),
-                },
-            )
-
-        except Exception as exc:
-            result["error"] = str(exc)
-            _log.error("Fel vid Excel-import: %s", exc, exc_info=True)
-
-        return result
+    def import_from_excel(self, filepath=None, parent=None) -> Dict[str, Any]:
+        """Importen är pausad tills användarens fil och dubblettregler verifierats."""
+        return {"success": False, "total_imported": 0, "processed_sheets": [],
+                "skipped_sheets": [], "error": "Excelimporten är tillfälligt spärrad tills dubbletter och filformat har granskats."}
 
     # ──────────────────────────────────────────────────────────────────────
     # INTERNA HJÄLPMETODER
@@ -985,41 +709,8 @@ class Plugin(PluginBase):
                 "records": [],
             }
 
-    def _merge_dealers(
-        self, new_records: List[Dict[str, Any]]
-    ) -> None:
-        """
-        Merga nya poster med befintliga.
-
-        Nya poster skriver över gamla vid DN-kollision.
-        Sorterar alfabetiskt på namn efter merge.
-
-        Args:
-            new_records: Nya poster att merga in
-        """
-        existing = self.load_from_json()
-        merged: Dict[str, Dict[str, Any]] = {}
-
-        for rec in existing:
-            dn = str(
-                rec.get("dealer_number", rec.get("dn", ""))
-            ).strip().upper()
-            if dn:
-                merged[dn] = rec
-
-        for rec in new_records:
-            dn = str(
-                rec.get("dealer_number", rec.get("dn", ""))
-            ).strip().upper()
-            if dn:
-                merged[dn] = rec
-
-        final_list = sorted(
-            merged.values(),
-            key=lambda x: str(x.get("namn", "")).lower(),
-        )
-        self.save_to_json(final_list)
-        _log.debug("Merge klar: totalt %d ÅF", len(final_list))
+    def _merge_dealers(self, new_records: List[Dict[str, Any]]) -> None:
+        raise RuntimeError("Excelimporten är spärrad tills dubblettreglerna har granskats")
 
     def _read_json(self, path: Path) -> Any:
         """
@@ -1087,9 +778,10 @@ class Plugin(PluginBase):
         """Emittera event via event_bus utan att krascha."""
         try:
             bus = getattr(self.app, "event_bus", None)
-            if bus and hasattr(bus, "publish"):
+            if bus and hasattr(bus, "emit"):
+                bus.emit(event, data)
+            elif bus and hasattr(bus, "publish"):
                 bus.publish(event, data)
-                _log.debug("Event: %s %s", event, data)
         except Exception as exc:
             _log.debug("Event-fel '%s': %s", event, exc)
 
@@ -1174,12 +866,10 @@ class DealersWidget(QWidget):
         layout.setSpacing(10)
 
         # ── TITEL ──
-        title = QLabel("🏢 Återförsäljare")
-        title.setObjectName("PageTitle")
-        title_font = QFont()
-        title_font.setPointSize(18)
-        title_font.setBold(True)
-        title.setFont(title_font)
+        # Gemensamt sidhuvud: storlek och färg kommer från temat (förslag 5).
+        title = PageHeader.build(
+            "Återförsäljare", "dealers",
+            "Alla återförsäljare i kolumner, sökbara och PIN-skyddade", self)
         title.setAlignment(Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(title)
 
@@ -1195,7 +885,7 @@ class DealersWidget(QWidget):
         self._search_input = QLineEdit()
         self._search_input.setObjectName("SearchInput")
         self._search_input.setPlaceholderText(
-            "Sök på namn, dealer number, org.nr..."
+            "Sök i alla kolumner..."
         )
         self._search_input.setClearButtonEnabled(True)
         self._search_input.textChanged.connect(self._on_search)
@@ -1246,26 +936,35 @@ class DealersWidget(QWidget):
         self._table_view.setMinimumHeight(200)
 
         header = self._table_view.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(
-            0, QHeaderView.ResizeMode.ResizeToContents
-        )
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(
-            2, QHeaderView.ResizeMode.ResizeToContents
-        )
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setResizeContentsPrecision(-1)  # Inkludera alla synliga rader, inte bara ett urval.
+        self._auto_columns = True
+        self._setting_column_widths = False
+        self._column_natural_widths = []
+        from PySide6.QtCore import QTimer
+        self._column_fit_timer = QTimer(self)
+        self._column_fit_timer.setSingleShot(True)
+        self._column_fit_timer.timeout.connect(self._fit_dealer_columns)
+        self._column_resize_timer = QTimer(self)
+        self._column_resize_timer.setSingleShot(True)
+        self._column_resize_timer.timeout.connect(
+            lambda: self._apply_dealer_column_widths(self._table_view.viewport().width()))
+        header.sectionResized.connect(self._column_resized)
+        self._table_view.viewport().installEventFilter(self)
         layout.addWidget(self._table_view, 1)
 
         # ── KNAPPAR ──
         btn_group = QGroupBox("Åtgärder")
         btn_group.setObjectName("ActionGroup")
-        btn_layout = QHBoxLayout(btn_group)
+        from plugins.main_gui.flow_layout import FlowLayout
+        btn_layout = FlowLayout(btn_group)
 
         buttons_config: List[Dict[str, Any]] = [
             {
-                "text": "📥 Importera Excel",
+                "text": "📥 Importera fil",
                 "name": "PrimaryButton",
-                "tooltip": "Importera återförsäljare från Excel-fil",
+                "tooltip": "Importera återförsäljare från Excel, CSV eller PDF",
                 "handler": self._import_excel,
             },
             {
@@ -1287,16 +986,22 @@ class DealersWidget(QWidget):
                 "handler": self._delete_selected,
             },
             {
+                "text": "↔ Anpassa kolumner",
+                "name": "SecondaryButton",
+                "tooltip": "Anpassa kolumnbredder automatiskt efter innehåll och tillgänglig bredd",
+                "handler": self._restore_auto_columns,
+            },
+            {
+                "text": "🔐 Byt PIN",
+                "name": "SecondaryButton",
+                "tooltip": "Byt PIN-kod för ändringar i återförsäljarregistret",
+                "handler": self._change_dealer_pin,
+            },
+            {
                 "text": "📤 Exportera JSON",
                 "name": "SecondaryButton",
                 "tooltip": "Exportera alla återförsäljare till JSON-fil",
                 "handler": self._export_json,
-            },
-            {
-                "text": "🔑 Lösenord",
-                "name": "SecondaryButton",
-                "tooltip": "Byt lösenord för redigering",
-                "handler": self._change_password,
             },
         ]
 
@@ -1306,13 +1011,16 @@ class DealersWidget(QWidget):
             btn.setToolTip(cfg["tooltip"])
             _set_bold(btn)
             btn.setSizePolicy(
-                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
             )
             btn.setMinimumHeight(36)
             btn.clicked.connect(cfg["handler"])
             btn_layout.addWidget(btn)
 
         layout.addWidget(btn_group)
+        security_note = QLabel("PIN krävs vid ändringar i programmet. Registerfilen är inte krypterad.")
+        security_note.setWordWrap(True)
+        layout.addWidget(security_note)
 
         # ── FOOTER ──
         footer_layout = QHBoxLayout()
@@ -1345,6 +1053,49 @@ class DealersWidget(QWidget):
     # WIDGET API
     # ──────────────────────────────────────────────────────────────────────
 
+    def _column_resized(self, _index: int, _old: int, _new: int) -> None:
+        # Manuell ändring respekteras tills användaren väljer automatisk anpassning igen.
+        if not self._setting_column_widths:
+            self._auto_columns = False
+            self._column_fit_timer.stop()
+
+    def _restore_auto_columns(self) -> None:
+        self._auto_columns = True
+        self._fit_dealer_columns()
+
+    def _fit_dealer_columns(self) -> None:
+        if not self._auto_columns:
+            return
+        header = self._table_view.horizontalHeader()
+        self._setting_column_widths = True
+        try:
+            self._table_view.resizeColumnsToContents()
+            self._column_natural_widths = [header.sectionSize(i) for i in range(len(FIELDS))]
+        finally:
+            self._setting_column_widths = False
+        self._apply_dealer_column_widths(self._table_view.viewport().width())
+
+    def _apply_dealer_column_widths(self, viewport_width: int) -> None:
+        if not self._auto_columns or not self._column_natural_widths or self._setting_column_widths:
+            return
+        from core.responsive_layout import fit_columns
+        header = self._table_view.horizontalHeader()
+        widths = fit_columns(self._column_natural_widths, viewport_width)
+        self._setting_column_widths = True
+        try:
+            for column, width in enumerate(widths):
+                header.resizeSection(column, width)
+        finally:
+            self._setting_column_widths = False
+
+    def eventFilter(self, watched, event):
+        from PySide6.QtCore import QEvent
+        if watched is self._table_view.viewport() and event.type() == QEvent.Type.Resize:
+            # Vänta tills Qt är klar med eventuella rullningslister och mät den
+            # verkliga visningsbredden; undvik återinträde under kolumnändringar.
+            self._column_resize_timer.start(0)
+        return super().eventFilter(watched, event)
+
     def refresh(self) -> None:
         """Ladda data från plugin och uppdatera tabell."""
         try:
@@ -1354,7 +1105,7 @@ class DealersWidget(QWidget):
             self._status_label.setText(
                 f"✅ Laddade {total} återförsäljare"
             )
-            self._count_label.setText(f"{total} återförsäljare")
+            self._on_search()  # Behåll rätt träffantal även efter omladdning.
             _log.debug("DealersWidget uppdaterad: %d poster", total)
         except Exception as exc:
             self._status_label.setText(f"❌ Fel vid laddning: {exc}")
@@ -1365,6 +1116,8 @@ class DealersWidget(QWidget):
         try:
             query = self._search_input.text().strip()
             self._proxy.setFilterFixedString(query)
+            if getattr(self, "_auto_columns", False):
+                self._column_fit_timer.start(250)
             visible = self._proxy.rowCount()
             total = self._model.rowCount()
             self._count_label.setText(
@@ -1394,35 +1147,9 @@ class DealersWidget(QWidget):
             return None
 
     def _import_excel(self) -> None:
-        """Starta Excel-import via plugin.import_from_excel()."""
-        try:
-            result = self.plugin.import_from_excel(parent=self)
-            if result["success"]:
-                lines = [
-                    "Import klar!",
-                    "",
-                    f"Totalt: {result['total_imported']} poster",
-                ]
-                if result["processed_sheets"]:
-                    lines += ["", "Bearbetade blad:"]
-                    lines += [f"  • {s}" for s in result["processed_sheets"]]
-                if result["skipped_sheets"]:
-                    lines += ["", "Hoppade blad:"]
-                    lines += [f"  • {s}" for s in result["skipped_sheets"]]
-
-                QMessageBox.information(
-                    self, "Import klar", "\n".join(lines)
-                )
-                self.refresh()
-            else:
-                QMessageBox.critical(
-                    self,
-                    "Import misslyckades",
-                    result.get("error", "Okänt fel"),
-                )
-        except Exception as exc:
-            _log.error("Import-fel: %s", exc, exc_info=True)
-            QMessageBox.critical(self, "Fel", str(exc))
+        """Använd samma säkra filimport som Arkiv-menyn."""
+        from plugins.main_gui.dialogs.import_dialog import start_import
+        start_import(self, self.app, None, self, destination="Återförsäljare")
 
     def _add_dealer(self) -> None:
         """Öppna AddDealerDialog för ny ÅF."""
@@ -1430,7 +1157,11 @@ class DealersWidget(QWidget):
             dialog = AddDealerDialog(self)
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 data = dialog.get_data()
-                if self.plugin.add_dealer(data):
+                from plugins.main_gui.dialogs.dealer_pin import request_pin
+                pin = request_pin(self, self.plugin)
+                if pin is None:
+                    return
+                if self.plugin.add_dealer(data, pin=pin):
                     QMessageBox.information(
                         self,
                         "Tillagd",
@@ -1442,7 +1173,7 @@ class DealersWidget(QWidget):
                         self,
                         "Fel",
                         "Kunde inte lägga till.\n"
-                        "Dealer Number kanske redan finns.",
+                        "Kontrollera om dealernumret redan finns eller om registret inte kan läsas/säkerhetskopieras.",
                     )
         except Exception as exc:
             _log.error("Lägg-till-fel: %s", exc, exc_info=True)
@@ -1463,21 +1194,25 @@ class DealersWidget(QWidget):
             dealer = self.plugin.get_by_dn(dn)
             if not dealer:
                 QMessageBox.warning(
-                    self, "Fel", f"Hittade inte ÅF med DN: {dn}"
+                    self, "Fel", f"Dealernumret {dn} saknas eller förekommer flera gånger. Ingen post ändrades."
                 )
                 return
 
             dialog = AddDealerDialog(self, existing_data=dealer)
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 updated = dialog.get_data()
-                if self.plugin.update_dealer(dn, updated):
+                from plugins.main_gui.dialogs.dealer_pin import request_pin
+                pin = request_pin(self, self.plugin)
+                if pin is None:
+                    return
+                if self.plugin.update_dealer(dn, updated, expected_record=dealer, pin=pin):
                     QMessageBox.information(
                         self, "Uppdaterad", "Återförsäljare uppdaterad"
                     )
                     self.refresh()
                 else:
                     QMessageBox.warning(
-                        self, "Fel", "Kunde inte uppdatera"
+                        self, "Fel", "Kunde inte uppdatera. Dealernumret kan redan finnas, uppgifterna ha ändrats eller säkerhetskopieringen misslyckats."
                     )
         except Exception as exc:
             _log.error("Redigera-fel: %s", exc, exc_info=True)
@@ -1494,7 +1229,10 @@ class DealersWidget(QWidget):
                 return
 
             dealer = self.plugin.get_by_dn(dn)
-            namn = dealer.get("namn", "Okänd") if dealer else "Okänd"
+            if not dealer:
+                QMessageBox.warning(self, "Fel", "Dealernumret saknas eller förekommer flera gånger. Ingen post togs bort.")
+                return
+            namn = dealer.get("namn", "Okänd")
 
             reply = QMessageBox.question(
                 self,
@@ -1506,14 +1244,18 @@ class DealersWidget(QWidget):
             )
 
             if reply == QMessageBox.StandardButton.Yes:
-                if self.plugin.delete_dealer(dn):
+                from plugins.main_gui.dialogs.dealer_pin import request_pin
+                pin = request_pin(self, self.plugin)
+                if pin is None:
+                    return
+                if self.plugin.delete_dealer(dn, expected_record=dealer, pin=pin):
                     QMessageBox.information(
                         self, "Borttagen", f"{namn} har tagits bort"
                     )
                     self.refresh()
                 else:
                     QMessageBox.warning(
-                        self, "Fel", "Kunde inte ta bort"
+                        self, "Fel", "Kunde inte ta bort. Uppgifterna kan ha ändrats, vara dubbla eller inte gå att säkerhetskopiera."
                     )
         except Exception as exc:
             _log.error("Borttagningsfel: %s", exc, exc_info=True)
@@ -1531,6 +1273,11 @@ class DealersWidget(QWidget):
             if not filepath:
                 return
 
+            target = Path(filepath).resolve()
+            protected = [self.plugin._json_path, self.plugin._json_path.parent / PASSWORD_FILENAME,
+                         self.plugin._json_path.parent / PIN_FILENAME]
+            if any(path is not None and target == path.resolve() for path in protected):
+                raise ValueError("Exporten får inte skriva över registrets data eller lösenordsfil")
             data = self.plugin.load_from_json()
             content = json.dumps(
                 data, ensure_ascii=False, indent=2, sort_keys=True
@@ -1548,6 +1295,10 @@ class DealersWidget(QWidget):
         except Exception as exc:
             _log.error("Exportfel: %s", exc, exc_info=True)
             QMessageBox.critical(self, "Exportfel", str(exc))
+
+    def _change_dealer_pin(self) -> None:
+        from plugins.main_gui.dialogs.dealer_pin import change_pin
+        change_pin(self, self.plugin)
 
     def _change_password(self) -> None:
         """
@@ -1675,9 +1426,6 @@ class AddDealerDialog(QDialog):
                 )
             )
             self._dn_input.setText(dn_val)
-            if self._is_edit:
-                self._dn_input.setReadOnly(True)
-                self._dn_input.setToolTip("DN kan inte ändras")
         form_layout.addWidget(self._dn_input, 0, 1)
 
         # Namn
@@ -1695,7 +1443,7 @@ class AddDealerDialog(QDialog):
         form_layout.addWidget(self._namn_input, 1, 1)
 
         # Org.nr
-        lbl_orgnr = QLabel("Org.nr:")
+        lbl_orgnr = QLabel("Person-/organisationsnummer:")
         _set_bold(lbl_orgnr)
         form_layout.addWidget(lbl_orgnr, 2, 0)
 
@@ -1707,6 +1455,17 @@ class AddDealerDialog(QDialog):
                 str(self._existing.get("orgnr", ""))
             )
         form_layout.addWidget(self._orgnr_input, 2, 1)
+
+        self._extra_inputs = {}
+        for row, (key, label) in enumerate(list(FIELDS.items())[3:], 3):
+            heading = QLabel(label + ":")
+            _set_bold(heading)
+            editor = QLineEdit()
+            if self._existing and self._existing.get(key) is not None:
+                editor.setText(str(self._existing[key]))
+            form_layout.addWidget(heading, row, 0)
+            form_layout.addWidget(editor, row, 1)
+            self._extra_inputs[key] = editor
 
         layout.addWidget(form_group)
 
@@ -1773,6 +1532,7 @@ class AddDealerDialog(QDialog):
             "dealer_number": self._dn_input.text().strip().upper(),
             "namn": self._namn_input.text().strip(),
             "orgnr": self._orgnr_input.text().strip(),
+            **{key: editor.text().strip() for key, editor in self._extra_inputs.items()},
         }
 
 

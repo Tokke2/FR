@@ -128,7 +128,7 @@ JSON_PREAMBLE_TEMPLATE: Final[str] = """// Auto-genererad fil
 
 # Default config
 DEFAULT_CONFIG: Final[Dict[str, Any]] = {
-    "app_name": "TADEGA Fordonsregistrering",
+    "app_name": "Fordonsreg",
     "app_version": "3.1.0",
     "app_author": "TADEGA AB",
     "base_dir": ".",
@@ -1239,6 +1239,7 @@ class Plugin(PluginBase):
 
     def _setup_paths(self) -> None:
         """Konfigurera sökvägar."""
+        from core.log_paths import app_log_dir
         base_dir = Path(self.app.config.get("base_dir", ".")) if hasattr(self.app, "config") else Path(".")
         js_data_dir = base_dir / self.app.config.get("js_data_dir", ".js data") if hasattr(self.app, "config") else base_dir / ".js data"
 
@@ -1248,7 +1249,7 @@ class Plugin(PluginBase):
             "data": base_dir / self.app.config.get("data_dir", "data") if hasattr(self.app, "config") else base_dir / "data",
             "vehicles": base_dir / self.app.config.get("vehicles_dir", "data/vehicles") if hasattr(self.app, "config") else base_dir / "data/vehicles",
             "ut": base_dir / self.app.config.get("ut_dir", "ut") if hasattr(self.app, "config") else base_dir / "ut",
-            "logs": base_dir / self.app.config.get("logs_dir", "logs") if hasattr(self.app, "config") else base_dir / "logs",
+            "logs": app_log_dir(),
             "dispatch": base_dir / self.app.config.get("dispatch_dir", "dispatch") if hasattr(self.app, "config") else base_dir / "dispatch",
         }
 

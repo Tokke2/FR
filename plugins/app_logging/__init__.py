@@ -1,0 +1,1 @@
+"""Kompletterande loggning av Qt."""

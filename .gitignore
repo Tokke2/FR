@@ -1,0 +1,57 @@
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Application-generated cache
+/cache/
+
+# Lokala inställningar och säkerhetskopior från uppdateraren
+/settings.json
+/.update-backups/
+/.update-staging/
+
+# Loggar skapas lokalt på nytt vid körning
+/logs/
+
+# Lokala Excel-inläsningar, inte distribuerade programfiler
+/dispatch/*.xlsx
+/dispatch/*.xls
+/sap/*.xlsx
+/sap/*.xls
+/xlsx/*.xlsx
+/xlsx/*.xls
+/In/*.xlsx
+/In/*.xls
+
+# Namngivna mappningsprofiler är användardata
+/json/mappings/vehicle_mapping_profiles.json
+
+# Säkerhetskopior av användarens fordonsdata
+/data/vehicle_backups/
+
+# Lokalt återförsäljarregister och säkerhetskopior
+/.js data/
+
+# Lokalt inlärningsminne är användardata
+/json/mappings/learning.json
+
+# Lokala mallar för återförsäljarimport
+/json/mappings/dealer_import_profiles.json
+
+# Färgregister, mappningar och verifierade säkerhetskopior är användardata
+/data/colors_manager/
+
+# Importerat, overifierat TS-underlag är användardata
+/data/ts_spec_underlag/
+
+# Verifierade säkerhetskopior av importmappningar är användardata
+/json/mappings/backup_mappningar/
+
+# Körtidstillstånd som aldrig ska versionshanteras
+.health/
+data/search_index.json
+json/watched_folder.json
+ts_verification.json

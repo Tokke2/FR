@@ -69,6 +69,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
 )
 
+from plugins.gui_helpers.page_header import PageHeader
 from core.plugin_base import PluginBase
 
 
@@ -778,13 +779,10 @@ class HistoryPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        # Titel
-        title = QLabel("📊 Registrerade Fordon (Historik)")
-        title.setObjectName("PageTitle")
-        title.setStyleSheet(
-            "font-size: 22px; font-weight: bold; color: #ffffff;"
-        )
-        layout.addWidget(title)
+        # Samma sidhuvud som övriga sidor (förslag 5).
+        layout.addWidget(PageHeader.build(
+            "Rapporter och historik", "reports",
+            "Registrerade fordon, ändringar och exporter", self))
 
         # Knappar
         btn_layout = QHBoxLayout()

@@ -1021,6 +1021,7 @@ class EventBus:
         """
         Emittera ett event till alla matchande subscribers.
         """
+        _log.debug("Event: %s", event_name)  # Ingen nyttolast i loggen.
         if event_name in self._muted_events:
             return 0
 
@@ -1203,6 +1204,7 @@ class EventBus:
         """
         Emittera och samla returvärden från alla subscribers.
         """
+        _log.debug("Event: %s", event_name)  # Ingen nyttolast i loggen.
         if event_name in self._muted_events:
             return []
 
@@ -1316,6 +1318,7 @@ class EventBus:
         """
         Async version av emit - väntar på alla async handlers.
         """
+        _log.debug("Event: %s", event_name)  # Ingen nyttolast i loggen.
         if event_name in self._muted_events:
             return 0
 

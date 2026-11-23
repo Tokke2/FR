@@ -113,29 +113,9 @@ def get_copyright_string() -> str:
 
 def get_logger() -> logging.Logger:
     try:
-        log = logging.getLogger("data_mapping.plugin")
-        if not log.handlers:
-            console = logging.StreamHandler()
-            console.setFormatter(logging.Formatter(
-                "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-                datefmt="%H:%M:%S",
-            ))
-            log.addHandler(console)
-            try:
-                log_dir = Path("logs")
-                log_dir.mkdir(exist_ok=True)
-                file_handler = logging.FileHandler(
-                    log_dir / "data_mapping.log",
-                    encoding="utf-8",
-                )
-                file_handler.setFormatter(logging.Formatter(
-                    "%(asctime)s [%(levelname)s] %(message)s"
-                ))
-                log.addHandler(file_handler)
-            except Exception:
-                pass
-            log.setLevel(logging.INFO)
-        return log
+        # Samma katalog och rotationshanterare som appens övriga kategoriloggar.
+        from core.logger_setup import setup_logger
+        return setup_logger("data_mapping.plugin")
     except Exception:
         return logging.getLogger(__name__)
 
@@ -1242,24 +1222,19 @@ class Plugin(PluginBase):
     # 14. generate_ts_file
     def generate_ts_file(self, vehicles: List[Dict[str, Any]], output_path: str) -> Dict[str, Any]:
         """Generera TS-fil – delegerar till ts_file_generator om tillgängligt."""
+        from core.ts_safety import generation_block_reason
+        reason = generation_block_reason()
+        if reason:
+            from core.dispatch_color_gate import dispatch_color_errors
+            errors = [reason]
+            if getattr(self, "app", None) is not None:
+                errors.extend(dispatch_color_errors(self.app))
+            return GenerateResult(success=False, errors=errors).to_dict()
         try:
             ts_gen = get_plugin_safe(self.app, "ts_file_generator")
             if ts_gen and hasattr(ts_gen, "generate_complete_file"):
                 return ts_gen.generate_complete_file(vehicles, output_path)
-            # fallback: enkel latin-1 dump
-            out = Path(output_path)
-            out.parent.mkdir(parents=True, exist_ok=True)
-            lines = []
-            for v in vehicles:
-                vin = str(v.get("VIN", v.get("vincode", ""))).ljust(17)[:17]
-                line = (vin + " " * (2500 - len(vin)))[:2500]
-                lines.append(line)
-            tmp = out.with_suffix(out.suffix + ".tmp")
-            with open(tmp, "w", encoding="iso-8859-1", newline="\n") as fh:
-                fh.write("\n".join(lines) + "\n")
-            os.replace(tmp, out)
-            result = GenerateResult(success=True, file_path=out, vehicles_count=len(vehicles))
-            return result.to_dict()
+            return GenerateResult(success=False, errors=["TS-filgeneratorn saknas; ingen fil skapades."]).to_dict()
         except Exception as exc:
             _log.exception("generate_ts_file failed: %s", exc)
             return GenerateResult(success=False, errors=[str(exc)]).to_dict()

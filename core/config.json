@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "app_name": "Transportstyrelsen Fordonsregistreringssystem",
+  "app_name": "Fordonsreg",
   "startup": false,
   "start_minimized": true,
   "theme": "auto",

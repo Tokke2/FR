@@ -421,26 +421,16 @@ def show_sap_editor(
     """Visa SAP-redigeringsfönstret med lösenordskontroll."""
     parent_widget = _coerce_parent(parent)
 
-    auth = _get_plugin_safe(app, "core_auth")
-    if auth is None:
-        QMessageBox.critical(parent_widget, "Fel", "Auth-plugin saknas.")
-        _log.error("Auth-plugin saknas vid öppning av SAP Editor.")
+    auth = _get_plugin_safe(app, "core_auth") or getattr(app, "auth", None)
+    dealer = _get_plugin_safe(app, "dealers_manager") or getattr(app, "dealers", None)
+    if auth is None or dealer is None:
+        QMessageBox.critical(parent_widget, "PIN-skydd", "Tidigare eller gemensamt PIN-skydd saknas.")
         return False
-
-    password, ok = QInputDialog.getText(
-        parent_widget,
-        "Lösenord",
-        "Ange lösenord för att redigera SAP-data:",
-        QLineEdit.EchoMode.Password,
-    )
-
-    if not ok:
-        _log.info("SAP Editor avbröts innan lösenord verifierades.")
-        return False
-
-    if not _verify_password(auth, password):
-        QMessageBox.critical(parent_widget, "Fel", "Felaktigt lösenord.")
-        _log.warning("Felaktigt lösenord vid försök att öppna SAP Editor.")
+    from core.pin_transition import sap_legacy_identity
+    from plugins.main_gui.dialogs.dealer_pin import request_migrated_pin
+    pin = request_migrated_pin(parent_widget, dealer, 'sap_editor',
+        lambda: sap_legacy_identity(auth), lambda value: _verify_password(auth, value), 'SAP-redigeraren')
+    if pin is None:
         return False
 
     dialog = SapEditorWindow(parent_widget, app, existing_data=existing_data)

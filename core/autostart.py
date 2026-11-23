@@ -7,25 +7,18 @@ Transportstyrelsen Fordonsregistreringssystem.
 
 ANSVAR:
     - Aktivera/inaktivera autostart vid OS-inloggning:
-        * Windows: Registry
-          (HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run)
-          + .bat-fallback i Startup-mappen om Registry nekas
-        * Linux:   ~/.config/autostart/<app>.desktop
-          (XDG Desktop Entry)
-        * macOS:   ~/Library/LaunchAgents/<bundle_id>.plist
-          (launchd)
-    - verify(): kontrollera att registrerad sökväg fortfarande
-      pekar på korrekt körbar fil/skript
-    - auto-repair: trasig/flyttad sökväg skrivs om automatiskt
-    - inga dubbletter: Registry-värde + .bat hålls synkade,
-      gammal post tas bort innan ny skrivs
+        * Windows: Fordonsreg-genväg med ikon i Startup-mappen.
+          Äldre Registry- och .bat-poster migreras efter verifiering.
+        * Linux: ~/.config/autostart/<app>.desktop (XDG Desktop Entry).
+        * macOS: ~/Library/LaunchAgents/<bundle_id>.plist (launchd).
+    - verify(): kontrollera sökvägar och ikon; reparera egna poster.
     - sync(): körs vid app-start — synkar OS-läget mot
       settings.json-nyckeln "startup" (settings är source of
       truth) och auto-reparerar trasiga poster
 
 API (spec Sektion D):
     AutostartManager.is_enabled()       -> bool
-    AutostartManager.set_enabled(bool)  -> None
+    AutostartManager.set_enabled(bool)  -> bool
     AutostartManager.sync()             -> None
     AutostartManager.build_command()    -> str
 
@@ -47,7 +40,7 @@ START-KOMMANDO:
 KRASCHSÄKERHET:
     - ALLA publika metoder kraschsäkra (fel loggas, appen
       kraschar aldrig p.g.a. autostart-hantering)
-    - Saknad winreg/otillgängligt Registry -> .bat-fallback
+    - Vid fel bevaras tidigare autostart i möjligaste mån
     - Saknade kataloger skapas vid behov
     - Filskrivning atomisk (mkstemp -> fsync -> os.replace)
 
@@ -59,6 +52,7 @@ from __future__ import annotations
 
 import logging
 import os
+import plistlib
 import sys
 import tempfile
 import threading
@@ -202,6 +196,7 @@ class AutostartManager:
                     return (
                         self._win_registry_get() is not None
                         or self._win_bat_path().exists()
+                        or self._win_shortcut_owned()
                     )
                 if IS_MACOS:
                     return self._mac_plist_path().exists()
@@ -212,41 +207,24 @@ class AutostartManager:
                 _log.error("is_enabled-fel: %s", exc)
                 return False
 
-    def set_enabled(self, enabled: bool) -> None:
-        """
-        Aktivera/inaktivera autostart. KRASCHSÄKER.
-
-        Uppdaterar både OS-registrering och settings.json
-        ("startup"). Inga dubbletter — gammal post tas alltid
-        bort först.
-
-        Args:
-            enabled: True = aktivera, False = inaktivera
-        """
+    def set_enabled(self, enabled: bool) -> bool:
+        """Ändra autostart och spara inställningen först när åtgärden lyckas."""
         with self._lock:
             try:
                 if enabled:
                     ok = self._install()
-                    if ok:
-                        _log.info(
-                            "Autostart aktiverad (%s)",
-                            self._platform_name(),
-                        )
-                    else:
-                        _log.error(
-                            "Autostart kunde inte aktiveras"
-                        )
                 else:
-                    self._uninstall()
-                    _log.info("Autostart inaktiverad")
-
-                self._save_setting(enabled and ok if enabled
-                                   else False)
-            except Exception as exc:
-                _log.error(
-                    "set_enabled(%s) misslyckades: %s",
-                    enabled, exc, exc_info=True,
-                )
+                    removed = self._uninstall()
+                    ok = removed is not False and not self.is_enabled()
+                if ok:
+                    self._save_setting(enabled)
+                    _log.info("Autostart %s", "aktiverad" if enabled else "inaktiverad")
+                else:
+                    _log.error("Autostart kunde inte ändras; tidigare inställning bevaras")
+                return ok
+            except Exception:
+                _log.exception("set_enabled(%s) misslyckades", enabled)
+                return False
 
     def sync(self) -> None:
         """
@@ -276,7 +254,7 @@ class AutostartManager:
                             "sync: trasig autostart-post -> "
                             "auto-repair"
                         )
-                        self._uninstall()
+                        # Ersätt posten först när den nya är klar.
                         self._install()
                     else:
                         _log.debug("sync: autostart OK")
@@ -335,27 +313,24 @@ class AutostartManager:
             expected = self.build_command()
 
             if IS_WINDOWS:
-                current = self._win_registry_get()
-                if current is not None:
-                    return self._command_paths_valid(
-                        current
-                    ) and current.strip() == expected.strip()
-                bat = self._win_bat_path()
-                if bat.exists():
-                    content = bat.read_text(
-                        encoding="utf-8", errors="replace"
-                    )
-                    return expected.strip() in content
-                return False
+                # Den gamla Registry-/bat-varianten behöver migreras även om
+                # kommandot fortfarande fungerar, annars visas Python-ikonen.
+                return (self._win_registry_get() is None
+                        and not self._win_bat_path().exists()
+                        and self._win_shortcut_matches()
+                        and self._command_paths_valid(expected))
 
             if IS_MACOS:
                 plist = self._mac_plist_path()
                 if not plist.exists():
                     return False
-                content = plist.read_text(
-                    encoding="utf-8", errors="replace"
-                )
-                return self._all_paths_in_text(content)
+                info = plistlib.loads(plist.read_bytes())
+                expected_args = ([str(Path(sys.executable).resolve())]
+                                 if getattr(sys, "frozen", False) else
+                                 [self._find_interpreter(), str(self._find_entry_script())])
+                return (info.get("ProgramArguments") == expected_args
+                        and info.get("WorkingDirectory") == str(self._base_dir)
+                        and all(Path(arg).exists() for arg in expected_args))
 
             if IS_LINUX:
                 desktop = self._linux_desktop_path()
@@ -364,8 +339,13 @@ class AutostartManager:
                 content = desktop.read_text(
                     encoding="utf-8", errors="replace"
                 )
+                icon_path = self._base_dir / "ikon_256.png"
                 return (
-                    f"Exec={expected}" in content
+                    f"Name={self._desktop_value(self._read_app_display_name())}\n" in content
+                    and f"Exec={expected}" in content
+                    and f"Path={self._desktop_value(str(self._base_dir))}" in content
+                    and icon_path.is_file()
+                    and f"Icon={self._desktop_value(str(icon_path))}" in content
                     and self._command_paths_valid(expected)
                 )
 
@@ -392,10 +372,7 @@ class AutostartManager:
     # ──────────────────────────────────────────────────────────────────
 
     def _install(self) -> bool:
-        """Installera autostart-post. Tar bort dubbletter först."""
-        # Inga dubbletter: rensa befintliga poster först
-        self._uninstall()
-
+        """Installera autostart-post; Windows migreras utan att först radera den gamla."""
         command = self.build_command()
         if not self._command_paths_valid(command):
             _log.error(
@@ -406,12 +383,7 @@ class AutostartManager:
             return False
 
         if IS_WINDOWS:
-            if self._win_registry_set(command):
-                return True
-            _log.warning(
-                "Registry nekades — använder .bat-fallback"
-            )
-            return self._win_bat_install(command)
+            return self._win_shortcut_install()
 
         if IS_MACOS:
             return self._mac_plist_install()
@@ -425,18 +397,33 @@ class AutostartManager:
         )
         return False
 
-    def _uninstall(self) -> None:
-        """Ta bort ALLA autostart-poster (Registry + .bat etc.)."""
+    def _uninstall(self) -> bool:
+        """Ta bort egna poster, men lämna okända eller oläsbara genvägar orörda."""
         if IS_WINDOWS:
-            self._win_registry_delete()
-            self._safe_unlink(self._win_bat_path())
-        elif IS_MACOS:
+            ok = self._win_registry_delete()
+            bat = self._win_bat_path()
+            self._safe_unlink(bat)
+            ok = ok and not bat.exists()
+            path = self._win_shortcut_path()
+            if path.exists() or path.is_symlink():
+                details = self._win_shortcut_details()
+                if details is None:
+                    _log.error("Kan inte kontrollera autostartgenvägen; lämnar den orörd")
+                    return False
+                if details.get("description") == "Fordonsreg autostart":
+                    self._safe_unlink(path)
+                    ok = ok and not (path.exists() or path.is_symlink())
+            return ok
+        if IS_MACOS:
             self._safe_unlink(self._mac_plist_path())
-        elif IS_LINUX:
+            return not self._mac_plist_path().exists()
+        if IS_LINUX:
             self._safe_unlink(self._linux_desktop_path())
+            return not self._linux_desktop_path().exists()
+        return False
 
     # ──────────────────────────────────────────────────────────────────
-    # WINDOWS: REGISTRY + .BAT-FALLBACK
+    # WINDOWS: GENVÄG OCH MIGRERING AV ÄLDRE AUTOSTART
     # ──────────────────────────────────────────────────────────────────
 
     def _win_registry_get(self) -> Optional[str]:
@@ -482,10 +469,10 @@ class AutostartManager:
             _log.warning("Registry-skrivning nekades: %s", exc)
             return False
 
-    def _win_registry_delete(self) -> None:
+    def _win_registry_delete(self) -> bool:
         """Ta bort Registry-värdet. Ofarligt om det saknas."""
         if not _HAS_WINREG:
-            return
+            return True
         try:
             import winreg
             with winreg.OpenKey(
@@ -494,13 +481,15 @@ class AutostartManager:
             ) as key:
                 winreg.DeleteValue(key, self._app_name)
             _log.debug("Registry-autostart borttagen")
+            return True
         except FileNotFoundError:
-            pass
+            return True
         except Exception as exc:
-            _log.debug("Registry-borttagning fel: %s", exc)
+            _log.warning("Registry-borttagning fel: %s", exc)
+            return False
 
     def _win_startup_dir(self) -> Path:
-        """Användarens Startup-mapp (för .bat-fallback)."""
+        """Användarens Startup-mapp."""
         appdata = os.environ.get("APPDATA", "")
         if appdata:
             return (
@@ -516,8 +505,83 @@ class AutostartManager:
         )
 
     def _win_bat_path(self) -> Path:
-        """Sökväg till fallback-.bat i Startup-mappen."""
+        """Sökväg till tidigare fallback-.bat."""
         return self._win_startup_dir() / f"{self._app_name}.bat"
+
+    def _win_shortcut_path(self) -> Path:
+        return self._win_startup_dir() / "Fordonsreg autostart.lnk"
+
+    def _win_shortcut_details(self) -> Optional[Dict[str, str]]:
+        path = self._win_shortcut_path()
+        if path.is_symlink() or not path.is_file():
+            return None
+        try:
+            from core.desktop_shortcut import read_windows_shortcut
+            return read_windows_shortcut(path)
+        except Exception as exc:
+            _log.warning("Kunde inte läsa autostartgenvägen: %s", exc)
+            return None
+
+    def _win_shortcut_owned(self) -> bool:
+        details = self._win_shortcut_details()
+        return bool(details and details.get("description") == "Fordonsreg autostart")
+
+    def _win_shortcut_matches(self, details: Optional[Dict[str, str]] = None) -> bool:
+        if details is None:
+            details = self._win_shortcut_details()
+        if not details or details.get("description") != "Fordonsreg autostart":
+            return False
+        exe = str(Path(sys.executable).resolve()) if getattr(sys, "frozen", False) else self._find_interpreter()
+        arguments = "" if getattr(sys, "frozen", False) else f'"{self._find_entry_script()}"'
+        icon = self._base_dir / "ikon.ico"
+        def same_path(actual: str, expected: str) -> bool:
+            return os.path.normcase(os.path.normpath(actual)) == os.path.normcase(os.path.normpath(expected))
+        return (icon.is_file()
+                and same_path(details.get("target", ""), exe)
+                and details.get("arguments", "") == arguments
+                and same_path(details.get("directory", ""), str(self._base_dir))
+                and same_path(details.get("icon", ""), str(icon) + ",0"))
+
+    def _win_shortcut_install(self) -> bool:
+        """Skapa genväg först; rensa gamla startposter endast om det lyckas."""
+        from core.desktop_shortcut import read_windows_shortcut, write_windows_shortcut
+        path = self._win_shortcut_path()
+        try:
+            details = self._win_shortcut_details()
+            exists = path.exists() or path.is_symlink()
+            if exists and (not details or details.get("description") != "Fordonsreg autostart"):
+                _log.error("Okänd genväg finns redan och lämnas orörd: %s", path)
+                return False
+            if not self._win_shortcut_matches(details):
+                previous = path.read_bytes() if exists else None
+                path.parent.mkdir(parents=True, exist_ok=True)
+                frozen = getattr(sys, "frozen", False)
+                exe = Path(sys.executable).resolve() if frozen else Path(self._find_interpreter())
+                script = None if frozen else self._find_entry_script()
+                write_windows_shortcut(path, exe, script, self._base_dir,
+                                       self._base_dir / "ikon.ico", "Fordonsreg autostart",
+                                       replace=exists,
+                                       validator=lambda temp: self._win_shortcut_matches(read_windows_shortcut(temp)),
+                                       replace_guard=lambda: (not path.is_symlink()
+                                                              and path.is_file()
+                                                              and path.read_bytes() == previous))
+            # Rör inte gamla poster om skapande/verifiering misslyckades.
+            if self._win_registry_get() is not None and not self._win_registry_delete():
+                _log.error("Kunde inte ta bort tidigare autostart i Registry")
+                if not exists:
+                    self._safe_unlink(path)
+                return False
+            bat = self._win_bat_path()
+            self._safe_unlink(bat)
+            if bat.exists():
+                _log.error("Kunde inte ta bort tidigare autostartfil: %s", bat)
+                if not exists:
+                    self._safe_unlink(path)
+                return False
+            return True
+        except Exception:
+            _log.exception("Kunde inte skapa Fordonsregs autostartgenväg")
+            return False
 
     def _win_bat_install(self, command: str) -> bool:
         """Skriv .bat-fallback (atomiskt). Startar UTAN fönster."""
@@ -548,16 +612,29 @@ class AutostartManager:
         base = Path(xdg) if xdg else Path.home() / ".config"
         return base / "autostart" / f"{self._app_name}.desktop"
 
+    @staticmethod
+    def _desktop_value(value: str) -> str:
+        """Escape XDG Desktop Entry string values."""
+        return (value.replace("\\", "\\\\").replace("\n", "\\n")
+                .replace("\r", "\\r").replace("\t", "\\t"))
+
     def _linux_desktop_install(self, command: str) -> bool:
         """Skriv XDG Desktop Entry (atomiskt)."""
         try:
             app_display = self._read_app_display_name()
+            icon_path = self._base_dir / "ikon_256.png"
+            if not icon_path.is_file():
+                _log.error("Programikonen saknas; befintlig autostart bevaras")
+                return False
+            icon_line = f"Icon={self._desktop_value(str(icon_path))}\n"
             content = (
                 "[Desktop Entry]\n"
                 "Type=Application\n"
-                f"Name={app_display}\n"
+                f"Name={self._desktop_value(app_display)}\n"
                 f"Comment={get_copyright_string()}\n"
                 f"Exec={command}\n"
+                f"Path={self._desktop_value(str(self._base_dir))}\n"
+                f"{icon_line}"
                 "Terminal=false\n"
                 "Hidden=false\n"
                 "X-GNOME-Autostart-enabled=true\n"
@@ -586,45 +663,20 @@ class AutostartManager:
         )
 
     def _mac_plist_install(self) -> bool:
-        """Skriv launchd-plist (atomiskt)."""
+        """Skriv en korrekt escapad launchd-plist atomiskt."""
         try:
             if getattr(sys, "frozen", False):
                 args = [str(Path(sys.executable).resolve())]
             else:
-                args = [
-                    self._find_interpreter(),
-                    str(self._find_entry_script()),
-                ]
-
-            args_xml = "\n".join(
-                f"        <string>{a}</string>" for a in args
-            )
-            content = (
-                '<?xml version="1.0" encoding="UTF-8"?>\n'
-                '<!DOCTYPE plist PUBLIC '
-                '"-//Apple//DTD PLIST 1.0//EN" '
-                '"http://www.apple.com/DTDs/'
-                'PropertyList-1.0.dtd">\n'
-                '<plist version="1.0">\n'
-                "<dict>\n"
-                "    <key>Label</key>\n"
-                f"    <string>{self._bundle_id}</string>\n"
-                "    <key>ProgramArguments</key>\n"
-                "    <array>\n"
-                f"{args_xml}\n"
-                "    </array>\n"
-                "    <key>RunAtLoad</key>\n"
-                "    <true/>\n"
-                "    <key>WorkingDirectory</key>\n"
-                f"    <string>{self._base_dir}</string>\n"
-                "</dict>\n"
-                "</plist>\n"
-            )
+                args = [self._find_interpreter(), str(self._find_entry_script())]
+            content = plistlib.dumps({
+                "Label": self._bundle_id,
+                "ProgramArguments": args,
+                "RunAtLoad": True,
+                "WorkingDirectory": str(self._base_dir),
+            }).decode("utf-8")
             _atomic_write_text(self._mac_plist_path(), content)
-            _log.info(
-                ".plist-autostart skriven: %s",
-                self._mac_plist_path(),
-            )
+            _log.info(".plist-autostart skriven: %s", self._mac_plist_path())
             return True
         except Exception as exc:
             _log.error(".plist-skrivning fel: %s", exc)
@@ -639,6 +691,10 @@ class AutostartManager:
         Hitta entry-skriptet. Föredrar main.pyw (spec: ingen
         terminal), fallback main.py.
         """
+        # Startfilen kan erbjuda installation innan Qt importeras.
+        launcher = self._base_dir / "start.pyw"
+        if launcher.exists():
+            return launcher
         pyw = self._base_dir / "main.pyw"
         if pyw.exists():
             return pyw
@@ -739,10 +795,11 @@ class AutostartManager:
                 if callable(getter):
                     name = getter("app_name", "")
                     if name:
-                        return str(name)
+                        from core.branding import display_name
+                        return display_name(name)
             except Exception:
                 pass
-        return "Transportstyrelsen Fordonsregistreringssystem"
+        return "Fordonsreg"
 
     # ──────────────────────────────────────────────────────────────────
     # HJÄLPARE

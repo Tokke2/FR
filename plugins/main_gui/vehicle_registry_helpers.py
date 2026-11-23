@@ -61,7 +61,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QWidget,
 )
@@ -199,6 +199,8 @@ class SearchResult:
     year: Optional[int] = None
     index: Optional[int] = None
     vin3: Optional[str] = None
+    snapshot: Optional[Dict[str, Any]] = None
+    was_open: bool = False
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -602,33 +604,61 @@ class ColumnMappingDialog(QDialog):
         initial_mapping: Dict[str, str],
         target_labels: Dict[str, str],
         parent: Optional[QWidget] = None,
+        profile_store: Optional[Any] = None,
+        examples: Optional[Dict[str, List[str]]] = None,
+        learned_headers: Optional[List[str]] = None,
+        allow_pin: bool = True,
+        allow_profile_save: bool = True,
     ) -> None:
         super().__init__(parent)
+        self._allow_pin = allow_pin
+        self._allow_profile_save = allow_profile_save
+        self._examples = examples or {}
+        self._learned_headers = set(learned_headers or [])
+        self._profile_store = profile_store
+        self._profiles: Dict[str, Dict[str, str]] = {}
         self._headers = headers
         self._initial_mapping = initial_mapping
         self._target_labels = target_labels
         self._combos: List[QComboBox] = []
         self.setWindowTitle("Kolumnmappning")
-        self.setMinimumSize(700, 500)
+        self.setMinimumSize(850, 500)
         self._setup_ui()
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         info = QLabel(
-            "Koppla varje Excel-rubrik till ett internt fält. "
+            "Koppla varje filrubrik till ett internt fält. "
             "Välj '-- inte mappad --' för kolumner som ska ignoreras.\n\n"
-            "Rubrikerna kommer från rad 1 i alla blad i filen."
+            "Exempelvärden kommer från förhandslästa rader i alla blad; "
+            "de ändrar inte innehållet i originalfilen."
         )
+        if self._learned_headers:
+            info.setText(info.text() + "\n\nTidigare godkända val har fyllt i "
+                         + str(len(self._learned_headers)) + " kolumner. Kontrollera förslagen före import.")
         info.setWordWrap(True)
         layout.addWidget(info)
-        self._table = QTableWidget(len(self._headers), 2)
-        self._table.setHorizontalHeaderLabels(["Excel-rubrik", "Målfält"])
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(QLabel("Mappningsprofil:"))
+        self._profile_combo = QComboBox()
+        self._profile_combo.addItem("Aktuellt förslag / sparad mappning", "")
+        profile_row.addWidget(self._profile_combo)
+        self._save_profile_button = QPushButton("Spara som profil…")
+        self._save_profile_button.setEnabled(self._profile_store is not None and self._allow_profile_save)
+        self._save_profile_button.clicked.connect(self._save_profile)
+        profile_row.addWidget(self._save_profile_button)
+        layout.addLayout(profile_row)
+        self._table = QTableWidget(len(self._headers), 3)
+        self._table.setHorizontalHeaderLabels(["Filrubrik", "Exempelvärden (källa: värde)", "Målfält"])
         self._table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
         )
         self._table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch
+        )
+        self._table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch
         )
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -638,8 +668,14 @@ class ColumnMappingDialog(QDialog):
         )
         for row, header in enumerate(self._headers):
             header_item = QTableWidgetItem(header)
+            if _normalize_header(header) in self._learned_headers:
+                header_item.setToolTip("Förifyllt från tidigare godkända importer; kontrollera förslaget")
             header_item.setFlags(header_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._table.setItem(row, 0, header_item)
+            values = self._examples.get(_normalize_header(header), [])
+            example_item = QTableWidgetItem(" | ".join(values) if values else "–")
+            example_item.setFlags(example_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self._table.setItem(row, 1, example_item)
             combo = QComboBox()
             combo.addItem("-- inte mappad --", "")
             for field, label in sorted_targets:
@@ -650,22 +686,39 @@ class ColumnMappingDialog(QDialog):
                 idx = combo.findData(initial)
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
-            self._table.setCellWidget(row, 1, combo)
+            self._table.setCellWidget(row, 2, combo)
             self._combos.append(combo)
         layout.addWidget(self._table)
+        self._unmapped_label = QLabel()
+        self._unmapped_label.setWordWrap(True)
+        layout.addWidget(self._unmapped_label)
+        for combo in self._combos:
+            combo.currentIndexChanged.connect(self._update_unmapped_status)
+        self._profile_combo.currentIndexChanged.connect(self._select_profile)
+        self._refresh_profiles()
+        self._update_unmapped_status()
         # Sparalternativ
         options = QGroupBox("Sparalternativ")
         opt_layout = QFormLayout(options)
-        self._save_checkbox = QCheckBox("Spara mappning för framtida import")
+        self._save_checkbox = QCheckBox("Spara mappning för framtida import" if self._allow_pin
+                                        else "Lär av godkänd import (lokalt)")
         self._save_checkbox.setChecked(True)
         opt_layout.addRow(self._save_checkbox)
         self._protect_checkbox = QCheckBox("Skydda mappningen med PIN")
+        self._protect_checkbox.toggled.connect(
+            lambda checked: self._save_profile_button.setEnabled(
+                self._profile_store is not None and self._allow_profile_save and not checked))
         opt_layout.addRow(self._protect_checkbox)
         self._pin_input = QLineEdit()
         self._pin_input.setEchoMode(QLineEdit.EchoMode.Password)
         self._pin_input.setEnabled(False)
         self._protect_checkbox.toggled.connect(self._pin_input.setEnabled)
-        opt_layout.addRow("PIN:", self._pin_input)
+        if self._allow_pin:
+            self._pin_input.setVisible(False)
+            opt_layout.addRow(QLabel("Skyddade mappningar använder den gemensamma PIN-koden."))
+        else:
+            self._protect_checkbox.setVisible(False)
+            self._pin_input.setVisible(False)
         layout.addWidget(options)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -674,6 +727,102 @@ class ColumnMappingDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _refresh_profiles(self, selected: str = "") -> None:
+        if self._profile_store is None:
+            return
+        try:
+            self._profiles = self._profile_store.list_profiles()
+        except Exception as exc:
+            _log.warning("Kunde inte läsa mappningsprofiler: %s", exc)
+            QMessageBox.warning(self, "Mappningsprofiler", str(exc))
+            self._save_profile_button.setEnabled(False)
+            return
+        self._profile_combo.blockSignals(True)
+        self._profile_combo.clear()
+        self._profile_combo.addItem("Aktuellt förslag / sparad mappning", "")
+        from core.vehicle_import_insights import profile_coverage
+        for name in sorted(self._profiles, key=str.casefold):
+            matched, total = profile_coverage(self._headers, self._profiles[name], self._target_labels, _normalize_header)
+            self._profile_combo.addItem(f"{name} — {matched} av {total} kolumner", name)
+        index = self._profile_combo.findData(selected)
+        self._profile_combo.setCurrentIndex(index if index >= 0 else 0)
+        self._profile_combo.blockSignals(False)
+
+    def _select_profile(self, *_args: Any) -> None:
+        name = self._profile_combo.currentData()
+        mapping = self._profiles.get(name, {}) if name else self._initial_mapping
+        for header, combo in zip(self._headers, self._combos):
+            field = mapping.get(_normalize_header(header), "")
+            index = combo.findData(field)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+        self._update_unmapped_status()
+
+    def _unmapped_headers(self) -> List[str]:
+        from core.vehicle_mapping_profiles import unmapped_headers
+        return unmapped_headers(self._headers, self.get_mapping(), _normalize_header)
+
+    def _update_unmapped_status(self, *_args: Any) -> None:
+        missing = self._unmapped_headers()
+        if missing:
+            sample = ", ".join(missing[:6])
+            if len(missing) > 6:
+                sample += ", …"
+            self._unmapped_label.setText(f"{len(missing)} kolumner kommer inte med: {sample}")
+            self._unmapped_label.setToolTip("\n".join(missing))
+        else:
+            self._unmapped_label.setText("Alla kolumner är mappade.")
+            self._unmapped_label.setToolTip("")
+
+    def _save_profile(self) -> None:
+        if not self._allow_profile_save or self.protect_checked():
+            QMessageBox.warning(self, "Mappningsprofil", "En PIN-skyddad mappning kan inte sparas som oskyddad profil.")
+            return
+        mapping = self.get_mapping()
+        if not mapping:
+            QMessageBox.warning(self, "Mappningsprofil", "Mappa minst en kolumn innan profilen sparas.")
+            return
+        name, ok = QInputDialog.getText(
+            self, "Spara mappningsprofil",
+            "Ange ett profilnamn, exempelvis leverantörens namn.\n"
+            "Namngivna profiler sparas separat och är inte PIN-skyddade:",
+        )
+        if not ok:
+            return
+        try:
+            try:
+                self._profile_store.save(name, mapping)
+            except FileExistsError:
+                answer = QMessageBox.question(
+                    self, "Profilen finns redan", "Vill du ersätta den befintliga profilen?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+                self._profile_store.save(name, mapping, overwrite=True)
+            self._refresh_profiles(name.strip())
+        except Exception as exc:
+            _log.warning("Kunde inte spara mappningsprofil: %s", exc)
+            QMessageBox.warning(self, "Kunde inte spara profil", str(exc))
+
+    def accept(self) -> None:
+        if not self.get_mapping():
+            QMessageBox.warning(self, "Ingen mappning", "Mappa minst en kolumn innan importen fortsätter.")
+            return
+        missing = self._unmapped_headers()
+        if missing:
+            message = QMessageBox(self)
+            message.setWindowTitle("Kolumner som inte importeras")
+            message.setIcon(QMessageBox.Icon.Warning)
+            message.setText(f"{len(missing)} kolumner är inte mappade och kommer inte att importeras. Fortsätta?")
+            message.setDetailedText("\n".join(missing))
+            message.setInformativeText("Välj Visa detaljer för att se alla kolumnnamn.")
+            message.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            message.setDefaultButton(QMessageBox.StandardButton.No)
+            if message.exec() != QMessageBox.StandardButton.Yes:
+                return
+        super().accept()
 
     def get_mapping(self) -> Dict[str, str]:
 
@@ -703,10 +852,8 @@ class ConflictResolutionDialog(QDialog):
 
     """
     Dialog för att välja åtgärd per dublett-VIN3 vid import.
-    Åtgärder:
-      - replace: Skriv över befintlig post med den nya
-      - skip:    Behåll befintlig post, hoppa över den nya
-      - merge:   Slå ihop fält (nytt värde vinner om det inte är tomt)
+    Åtgärder väljs uttryckligen per inkommande post. Vid olika kända
+    approval-nummer kan båda behållas, men ingen post ersätts eller hoppas över.
 
     """
 
@@ -717,7 +864,7 @@ class ConflictResolutionDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._conflicts = conflicts
-        self._actions: Dict[str, QComboBox] = {}
+        self._actions: Dict[Tuple[Any, ...], QComboBox] = {}
         self.setWindowTitle("Konflikter vid import")
         self.setMinimumSize(800, 450)
         self._setup_ui()
@@ -726,8 +873,8 @@ class ConflictResolutionDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         info = QLabel(
-            "Följande VIN3 finns redan i fordonsregistret. "
-            "Välj åtgärd för varje rad innan importen slutförs."
+            "Samma VIN3 förekommer flera gånger för samma år. Jämför approval och välj "
+            "åtgärd för varje rad. Vid olika approval ska båda posterna behållas."
         )
         info.setWordWrap(True)
         layout.addWidget(info)
@@ -747,29 +894,40 @@ class ConflictResolutionDialog(QDialog):
             vin = conflict.get("vin_kod", "")
             year = str(conflict.get("year", ""))
             existing = conflict.get("existing", {})
+            candidates = conflict.get("existing_candidates", [existing])
             incoming = conflict.get("incoming", {})
             self._table.setItem(row, 0, QTableWidgetItem(vin))
             self._table.setItem(row, 1, QTableWidgetItem(year))
-            self._table.setItem(row, 2, QTableWidgetItem(self._summary(existing)))
-            self._table.setItem(row, 3, QTableWidgetItem(self._summary(incoming)))
+            self._table.setItem(row, 2, QTableWidgetItem("\n".join(self._summary(item) for item in candidates)))
+            source = f"{conflict.get('source_sheet', '')}, rad {conflict.get('source_row', '')}"
+            self._table.setItem(row, 3, QTableWidgetItem(f"{self._summary(incoming)}\n{source}"))
             for col in (0, 1, 2, 3):
                 item = self._table.item(row, col)
                 if item:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             combo = QComboBox()
-            combo.addItem("📝 Skriv över", "replace")
-            combo.addItem("⏭️ Hoppa över", "skip")
-            combo.addItem("🔀 Slå ihop", "merge")
+            combo.addItem("Välj åtgärd...", None)
+            labels = {"keep_both": "Behåll båda", "skip": "Hoppa över inkommande",
+                      "replace": "Skriv över matchande", "merge": "Slå ihop med matchande"}
+            for action in conflict.get("allowed_actions", []):
+                combo.addItem(labels[action], action)
             self._table.setCellWidget(row, 4, combo)
-            self._actions[vin] = combo
+            self._actions[tuple(conflict["key"])] = combo
+        self._table.resizeRowsToContents()
         layout.addWidget(self._table)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._accept_if_resolved)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _accept_if_resolved(self) -> None:
+        if any(combo.currentData() is None for combo in self._actions.values()):
+            QMessageBox.warning(self, "Välj åtgärd", "Välj en åtgärd för varje dubblett eller avbryt importen.")
+            return
+        self.accept()
 
     @staticmethod
 
@@ -778,13 +936,14 @@ class ConflictResolutionDialog(QDialog):
             data.get("fabrikat", ""),
             data.get("handelsbeteckning", ""),
             data.get("typ", ""),
+            f"Approval: {data.get('avgaskrav_tillagg') or 'saknas'}",
         ]
         text = " ".join(str(p) for p in parts if p).strip()
         return text or "-"
 
-    def get_resolutions(self) -> Dict[str, str]:
+    def get_resolutions(self) -> Dict[Tuple[Any, ...], str]:
 
-        """Returnera {vin_kod: action}."""
+        """Returnera innehållsbundna val för konflikterna."""
         return {
             vin: combo.currentData()
             for vin, combo in self._actions.items()
@@ -932,7 +1091,9 @@ class GenerateTextFileDialog(QDialog):
         if not path:
             return
         try:
-            _write_vehicle_text_file(Path(path), selected)
+            from .dialogs.task_progress import run_task
+            run_task(self, "Genererar textfil", lambda progress:
+                     _write_vehicle_text_file(Path(path), selected, progress))
             QMessageBox.information(
                 self,
                 "Textfil genererad",
@@ -954,43 +1115,12 @@ class GenerateTextFileDialog(QDialog):
 def _write_vehicle_text_file(
     path: Path,
     selected: List[Tuple[int, Dict[str, Any]]],
+    progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> None:
-
-    """Skriv valda fordon till en semikolonseparerad textfil, atomiskt."""
-    field_keys: List[str] = []
-    for group_fields in FIELD_GROUPS.values():
-        for key, _, _ in group_fields:
-            field_keys.append(key)
-    lines: List[str] = []
-    lines.append("Fordonsexport;%s" % datetime.now().isoformat())
-    header = ["year"] + field_keys
-    lines.append(";".join(header))
-    for year, vehicle in selected:
-        row = [str(year)]
-        for key in field_keys:
-            value = str(vehicle.get(key, ""))
-            value = value.replace(";", ",").replace("\n", " ").replace("\r", "")
-            row.append(value)
-        lines.append(";".join(row))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(
-        dir=str(path.parent),
-        suffix=".tmp",
-        prefix=".%s.tmp_" % path.name,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(lines))
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, str(path))
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    """Skriv valda fordon atomiskt; progress rapporteras även under skrivning."""
+    from core.vehicle_text_export import write_vehicle_text_file
+    keys = [key for fields in FIELD_GROUPS.values() for key, _, _ in fields]
+    write_vehicle_text_file(path, selected, keys, progress)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # EXPORTS

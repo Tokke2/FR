@@ -8,12 +8,8 @@ FÖRÄNDRINGAR v6.0.3 (granskad — spec v1.6 förbättringsregeln + KRAV 82):
   - FIX (radbrytningsdubbling, transport-artefakt): tomrader mellan
     decoratorer (@dataclass/@property) och definitioner (class/def)
     BORTTAGNA — 6 st. Ingen logikändring.
-  - OBSERVATION (EJ ändrad, inväntar beslut): activate() anropar
-    sys.exit(self._qapp.exec()) — SystemExit avslutar processen när
-    fönstret stängs och main.py:s start()-sekvens (app:started-emit,
-    exit_code) körs aldrig klart. Rekommendation: main.py äger
-    QApplication.exec() och activate() skapar endast fönstret; eller
-    sys.exit tas bort (exec utan exit). Kräver beslut + runtime-test.
+  - GUI-pluginet skapar fönstret; Application.start äger Qt:s eventloop.
+    En timer hanterar fokusbegäran från andra starter.
 
 FÖRÄNDRINGAR v6.0.2 (Session 10 — spec v1.4):
   - Hela filen omskriven REN: markdown-artefakter borttagna
@@ -21,7 +17,7 @@ FÖRÄNDRINGAR v6.0.2 (Session 10 — spec v1.4):
   - logger -> _log (spec-konvention: module-level _log, ej logger/self.logger).
   - BUGG #5: "TADEGA AB" bort. app_author-default = "Rickard Längkvist";
     setApplicationName via config app_name (default
-    "Transportstyrelsen Fordonsregistreringssystem").
+    "Fordonsreg").
   - VIN3-konsistens (G6) verifierad: all VIN-validering sker via
     vehicle_registry.validate_vin (VIN3 = tecken 2-4, slice [1:4]).
     Ingen egen VIN3-extraktion i denna fil.
@@ -54,7 +50,7 @@ from typing import (
     Tuple,
     TYPE_CHECKING,
 )
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QSize, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -75,6 +71,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QWidget,
 )
+from core import layout_memory
+from core import theme as design
 from core.plugin_base import PluginBase
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QMenuBar
@@ -485,6 +483,8 @@ class Plugin(PluginBase):
     def initialize(self) -> None:
         """Initiera plugin."""
         _log.info("%s v%s initializing...", self.NAME, self.VERSION)
+        # Skärpan: skalfaktorn måste vara vald innan QApplication finns.
+        design.enable_high_dpi()
         # Skapa QApplication
         if QApplication.instance() is None:
             self._qapp = QApplication(sys.argv)
@@ -492,7 +492,7 @@ class Plugin(PluginBase):
                 get_config_value_safe(
                     self.app,
                     "app_name",
-                    "Transportstyrelsen Fordonsregistreringssystem",
+                    "Fordonsreg",
                 )
             )
         else:
@@ -513,23 +513,29 @@ class Plugin(PluginBase):
         self.is_active = True
         try:
             self._main_window = MainWindow(self.app)
-            self._main_window.show()
-            # Kör event loop om vi inte redan kör
-            if self._qapp and not self._qapp.startingUp():
-                sys.exit(self._qapp.exec())
+            # En normal ny start ska alltid hamna minimerad i aktivitetsfältet.
+            # En separat fokusbegäran kan därefter återställa fönstret.
+            self._main_window.showMinimized()
+            # Application.start() äger eventloopen och ordnad avslutning.
         except Exception as e:
             _log.error("Failed to activate Main GUI: %s", e, exc_info=True)
             raise
 
     def deactivate(self) -> None:
         """Deaktivera plugin."""
-        # Avregistrera events
+        if self._main_window:
+            window = self._main_window
+            if not window.isVisible() or window.isMinimized():
+                window._show_from_tray()
+            window._quit_requested = True
+            if not window.close():
+                window._quit_requested = False
+                return
+            self._main_window = None
+        # Behåll registrerade händelser om användaren avbröt stängningen.
         for event_name, handler in self._event_handlers:
             unsubscribe_event_safe(self.app, event_name, handler)
         self._event_handlers.clear()
-        if self._main_window:
-            self._main_window.close()
-            self._main_window = None
         self.is_active = False
         _log.info("%s deactivated", self.NAME)
 
@@ -577,6 +583,10 @@ class Plugin(PluginBase):
 
     # ──────────────────────────────────────────────────────────────────────────
 
+    @property
+    def main_window(self) -> Optional[MainWindow]:
+        return self._main_window
+
     def create_main_window(self) -> MainWindow:
         """Skapa huvudfönster."""
         if self._main_window is None:
@@ -616,8 +626,20 @@ class MainWindow(QMainWindow):
     def __init__(self, app: Any) -> None:
         super().__init__()
         self.app = app
+        # Programmet startar alltid minimerat. Flaggan stängs av först när
+        # användaren själv öppnar fönstret från systemfältet.
+        self._startup_phase = True
         self.vehicle_data_page: Optional[QWidget] = None
         self.ts_schema_page: Optional[QWidget] = None
+        self._error_log_dialog = None
+        self._tray_icon = None
+        self._tray_menu = None
+        self._tray_separator = None
+        self._tray_watch_timer = None
+        self._watched_timer = None
+        self._watched_pending = []
+        self._dashboard_pending = True
+        self._quit_requested = False
         # Config
         self.window_config = self._load_window_config()
         # Setup
@@ -626,32 +648,257 @@ class MainWindow(QMainWindow):
         self._init_pages()
         self._init_navigation()
         self._init_menu()
+        self._setup_system_tray()
+        self._setup_instance_focus()
+        self._setup_shortcuts()
+        self._setup_watched_folder()
+        self._confirm_startup_health()
         # Auto-load dispatch efter 500ms
         QTimer.singleShot(500, self._auto_load_dispatch)
+        self._pin_reminder_timer = QTimer(self)
+        self._pin_reminder_timer.timeout.connect(self._check_pin_reminder)
+        self._pin_reminder_timer.start(60000)
+        QTimer.singleShot(2000, self._check_pin_reminder)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Setup
 
     # ──────────────────────────────────────────────────────────────────────────
 
+    def _setup_instance_focus(self) -> None:
+        """Hantera även begäran som kommit under uppstart, på GUI-tråden."""
+        instance = getattr(self.app, "single_instance", None)
+        if instance is None:
+            return
+        instance.set_show_callback(self._show_from_tray)
+        self._instance_focus_timer = QTimer(self)
+        self._instance_focus_timer.timeout.connect(instance.check_show_request)
+        self._instance_focus_timer.start(500)
+        QTimer.singleShot(0, instance.check_show_request)
+
+    def _setup_system_tray(self) -> None:
+        """Använd systemfält endast när en synlig ikon finns att återvända till."""
+        try:
+            from PySide6.QtGui import QIcon
+            from PySide6.QtWidgets import QSystemTrayIcon
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                _log.info("Systemfält saknas; vanlig minimering och stängning används")
+                return
+            icon = QApplication.windowIcon()
+            if icon.isNull():
+                icon = QIcon(str(Path(__file__).resolve().parents[2] / "ikon_256.png"))
+            if icon.isNull():
+                _log.warning("Systemfältsikonen kunde inte laddas")
+                return
+            tray = QSystemTrayIcon(icon, self)
+            menu = QMenu(self)
+            menu.addAction("Öppna Fordonsreg", self._show_from_tray)
+            menu.addAction("🔎 Sök (Ctrl+K)", self._show_global_search)
+            menu.addAction("📥 Ny import...", self._import_file_dialog)
+            menu.addAction("📊 Översikt", self._show_dashboard)
+            menu.addAction("📋 Felsökningslogg", self._show_error_log)
+            separator = menu.addSeparator()
+            menu.addAction("Avsluta Fordonsreg", self._quit_application)
+            tray.setContextMenu(menu)
+            tray.setToolTip("Fordonsreg")
+            tray.activated.connect(self._tray_activated)
+            tray.messageClicked.connect(self._watched_message_clicked)
+            self._tray_icon, self._tray_menu, self._tray_separator = tray, menu, separator
+            tray.show()
+            self._tray_watch_timer = QTimer(self)
+            self._tray_watch_timer.timeout.connect(self._check_tray_available)
+            self._tray_watch_timer.start(5000)
+        except Exception:
+            _log.exception("Kunde inte skapa systemfältsikon")
+            if self._tray_icon is not None:
+                self._tray_icon.hide()
+            self._tray_icon = self._tray_menu = self._tray_separator = None
+
+    def _can_hide_to_tray(self) -> bool:
+        try:
+            from PySide6.QtWidgets import QSystemTrayIcon
+            return bool(self._tray_icon is not None and self._tray_icon.isVisible()
+                        and QSystemTrayIcon.isSystemTrayAvailable())
+        except Exception:
+            _log.exception("Systemfältet kunde inte kontrolleras")
+            return False
+
+    def _check_tray_available(self) -> None:
+        # Om skrivbordets panel försvinner får det dolda fönstret inte bli oåtkomligt.
+        if not self._quit_requested and not self._can_hide_to_tray() and not self.isVisible():
+            _log.warning("Systemfältet försvann; visar Fordonsreg minimerat igen")
+            self.showMinimized()
+
+    def changeEvent(self, event) -> None:
+        from PySide6.QtCore import QEvent
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange and self.isMinimized() and not getattr(self, "_quit_requested", False):
+            self._restore_maximized = bool(event.oldState() & Qt.WindowState.WindowMaximized)
+            QTimer.singleShot(0, self._hide_if_still_minimized)
+
+    def _hide_if_still_minimized(self) -> None:
+        # En fokusbegäran kan ha återställt fönstret innan timern körs.
+        if not self._quit_requested and self.isMinimized() and self._can_hide_to_tray():
+            self.hide()
+
+    def _quit_application(self, *_args) -> None:
+        """En uttrycklig Avsluta-åtgärd sparar/frågar och avslutar Qt-loopen."""
+        if not self.isVisible() or self.isMinimized():
+            self._show_from_tray()
+        self._quit_requested = True
+        try:
+            if not self.close():
+                self._quit_requested = False
+                return
+            application = QApplication.instance()
+            if application is not None:
+                application.quit()
+        except Exception:
+            self._quit_requested = False
+            _log.exception("Kunde inte avsluta Fordonsreg")
+            raise
+
+    def _watched_message_clicked(self) -> None:
+        """Tray-notisen om en ny fil öppnar importen – användaren väljer själv fil."""
+        if not self._watched_pending:
+            self._show_from_tray()
+            return
+        names = ", ".join(item["name"] for item in self._watched_pending[:5])
+        answer = QMessageBox.question(
+            self, "Ny importfil hittad",
+            f"{names}\n\nÖppna importen? Du väljer fil och godkänner själv. "
+            "Ingenting importeras automatiskt.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._show_from_tray()
+            self._import_file_dialog()
+
+    def _tray_activated(self, reason) -> None:
+        from PySide6.QtWidgets import QSystemTrayIcon
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self._show_from_tray()
+
+    def _show_from_tray(self, *_args) -> None:
+        self._startup_phase = False
+        if self.isMinimized():
+            if getattr(self, "_restore_maximized", False):
+                self.showMaximized()
+            else:
+                self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        # En modal dialog kan blockera huvudfönstret; lyft även den.
+        active_modal = getattr(QApplication, "activeModalWidget", None)
+        modal = active_modal() if callable(active_modal) else None
+        if modal is not None and (modal is self or self.isAncestorOf(modal)):
+            modal.raise_()
+            modal.activateWindow()
+
+    def add_update_tray_action(self, action: QAction) -> bool:
+        """Återanvänd uppdaterarens QAction, inklusive dess aktiverade tillstånd."""
+        if self._tray_menu is None:
+            return False
+        self._tray_menu.insertAction(self._tray_separator, action)
+        return True
+
     def _load_window_config(self) -> WindowConfig:
-        """Ladda fönsterkonfiguration."""
+        """Räkna fram fönsterstorlek och sidomeny utifrån skärmen.
+
+        Programmet ska passa på skärmen det startar på, inte kräva en fast
+        storlek. På en liten bärbar dator blir fönstret mindre och sidomenyn
+        smalare, så att innehållet får plats utan att något göms.
+        """
+        width, height = design.PREFERRED_WIDTH, design.PREFERRED_HEIGHT
+        self._restore_position = None
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width, height = design.window_size(available.width(), available.height())
+            # En sparad placering används bara om den fortfarande ryms helt.
+            saved = layout_memory.screen_geometry(
+                self._root(), screen.name(), available.width(), available.height())
+            if saved:
+                width, height = saved["width"], saved["height"]
+                self._restore_position = (saved["x"], saved["y"])
         return WindowConfig(
-            width=get_config_value_safe(self.app, "window_width", 1400),
-            height=get_config_value_safe(self.app, "window_height", 900),
-            sidebar_width=get_config_value_safe(self.app, "sidebar_width", 220),
+            width=width,
+            height=height,
+            sidebar_width=design.sidebar_width(width),
         )
 
     def _setup_window(self) -> None:
         """Konfigurera fönster."""
-        app_name = get_config_value_safe(self.app, "app_name", "Fordonsregistrering")
+        app_name = get_config_value_safe(self.app, "app_name", "Fordonsreg")
         app_version = get_config_value_safe(self.app, "app_version", __version__)
         self.setWindowTitle(f"{app_name} v{app_version}")
+        self.setWindowIcon(QApplication.windowIcon())
         self.resize(self.window_config.width, self.window_config.height)
+        position = getattr(self, "_restore_position", None)
+        if position:
+            self.move(position[0], position[1])
+        # Fönstret får aldrig bli mindre än skärmen tillåter.
+        self.setMinimumSize(min(design.MIN_WINDOW_WIDTH, self.window_config.width),
+                            min(design.MIN_WINDOW_HEIGHT, self.window_config.height))
 
     def _apply_stylesheet(self) -> None:
-        """Applicera stylesheet."""
-        self.setStyleSheet(MAIN_STYLESHEET)
+        """Applicera tema, typsnitt, densitet och skalning på hela fönstret."""
+        application = QApplication.instance()
+        self._font_family = design.apply_font(QApplication.instance() or self,
+                                              font_size=self._font_size())
+        self._theme = design.resolve_mode(self._theme_mode(),
+                                          design.system_is_dark(application) if application else True)
+        self._density = design.resolve_density(self._density_mode(), self.width(), self.height())
+        self._scale = design.clamp_scale(self._ui_scale())
+        self.setStyleSheet(design.stylesheet(self._theme, self._font_family, self._font_size(),
+                                             self._density, self._scale))
+        _log.info("Tema %s, typsnitt %s %dpt, densitet %s, skalning %.2f",
+                  self._theme, self._font_family, self._font_size(), self._density, self._scale)
+
+    def _appearance_changed(self, *_args) -> None:
+        """Växla tema eller textstorlek direkt, utan omstart."""
+        self._apply_stylesheet()
+        self._refresh_theme_actions()
+        self._refresh_nav_icons()
+
+    def _theme_mode(self) -> str:
+        """Läst temaläge ur konfigurationen: dark, light eller auto."""
+        for key, default in (("ui.theme", design.DEFAULT_MODE), ("theme.mode", design.DEFAULT_MODE)):
+            try:
+                value = get_config_value_safe(self.app, key, default)
+            except Exception:
+                continue
+            value = str(value or default).strip().lower()
+            if value in design.THEME_MODES:
+                return value
+        return design.DEFAULT_MODE
+
+    def _density_mode(self) -> str:
+        """Läst densitet: luftig, kompakt eller automatisk."""
+        try:
+            value = get_config_value_safe(self.app, "ui.density", design.DEFAULT_DENSITY)
+        except Exception:
+            value = design.DEFAULT_DENSITY
+        value = str(value or design.DEFAULT_DENSITY).strip().lower()
+        return value if value in design.DENSITY_MODES else design.DEFAULT_DENSITY
+
+    def _ui_scale(self) -> float:
+        """Läst skalning av hela gränssnittet (0,90–1,50)."""
+        try:
+            value = get_config_value_safe(self.app, "ui.scale", 1.0)
+        except Exception:
+            value = 1.0
+        return design.clamp_scale(value)
+
+    def _font_size(self) -> int:
+        """Textstorlek i punkter, alltid inom läsbara gränser."""
+        try:
+            value = get_config_value_safe(self.app, "ui.font_size", design.DEFAULT_FONT_SIZE)
+        except Exception:
+            value = design.DEFAULT_FONT_SIZE
+        return design.clamp_font_size(value)
 
     def _init_pages(self) -> None:
         """Initiera sidor från plugins."""
@@ -757,18 +1004,18 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title = QLabel(f"⚠️ {page_name}")
+        title = QLabel(design.strip_emoji_prefix(page_name))
         title.setObjectName("PageTitle")
-        title.setStyleSheet("font-size: 22px; font-weight: bold; color: #ffc107;")
         layout.addWidget(title)
         msg = QLabel(f"Plugin ej tillgänglig: {reason}")
-        msg.setStyleSheet("color: #ffc107; font-size: 14px;")
+        msg.setObjectName("Muted")
+        msg.setStyleSheet(f"color: {design.palette(self._theme)['warning']};")
         layout.addWidget(msg)
         info = QLabel(
             "Kontrollera att plugin är installerad och aktiverad korrekt\n\n"
             "Tips: Starta om programmet eller kontakta administratör"
         )
-        info.setStyleSheet("color: #888; font-size: 12px;")
+        info.setObjectName("Muted")
         info.setWordWrap(True)
         layout.addWidget(info)
         return widget
@@ -777,7 +1024,7 @@ class MainWindow(QMainWindow):
         """Skapa minimal TS Schema-sida."""
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        title = QLabel("📋 TS Schema-hantering")
+        title = QLabel("TS Schema-hantering")
         title.setObjectName("PageTitle")
         layout.addWidget(title)
         # Schema-info
@@ -785,8 +1032,10 @@ class MainWindow(QMainWindow):
         info_box = QGroupBox("Aktiv version")
         info_layout = QFormLayout(info_box)
         version_label = QLabel(schema_info.version or "Ingen version aktiv")
+        colors = design.palette(getattr(self, "_theme", "dark"))
         version_label.setStyleSheet(
-            f"color: {'#28a745' if schema_info.is_active else '#ffc107'}; font-weight: bold;"
+            f"color: {colors['success'] if schema_info.is_active else colors['warning']}; "
+            "font-weight: bold;"
         )
         info_layout.addRow("Version:", version_label)
         types_label = QLabel(
@@ -821,19 +1070,47 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         # Sidebar
-        sidebar = self._create_sidebar()
-        main_layout.addWidget(sidebar)
+        self.sidebar = self._create_sidebar()
+        # En delare gör sidomenyn justerbar och ihågkommen (förslag 2), så att
+        # den som vill se mer av tabellen kan dra i kanten. Delarens handtag
+        # är smalt och syns först när muspekaren är över kanten.
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setObjectName("MainSplitter")
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(4)
+        self.main_splitter.addWidget(self.sidebar)
         # Stackwidget
         self.stack = QStackedWidget()
-        main_layout.addWidget(self.stack)
+        self.main_splitter.addWidget(self.stack)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        start_width = design.sidebar_initial_width(
+            get_config_value_safe(self.app, "ui.sidebar_width", 0),
+            self.window_config.width, self._density_mode())
+        self._sidebar_user_width = start_width
+        self.main_splitter.setSizes([
+            max(1, start_width),
+            max(200, self.window_config.width - start_width),
+        ])
+        self.main_splitter.splitterMoved.connect(self._on_sidebar_resized)
+        main_layout.addWidget(self.main_splitter)
         # Lägg till alla sidor
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         for i, (page_name, widget) in enumerate(self.pages):
             self.stack.addWidget(widget)
-            btn = QPushButton(page_name)
+            btn = QPushButton(design.strip_emoji_prefix(page_name))
+            btn.setObjectName("NavButton")
             btn.setCheckable(True)
-            btn.setStyleSheet(SIDEBAR_BUTTON_STYLE)
+            # Skärmläsaren ska alltid få hela sidnamnet, även när bara ikonen syns.
+            design.set_accessible(btn, design.label_for_icon_button(design.strip_emoji_prefix(page_name)),
+                                  f"Öppna {design.strip_emoji_prefix(page_name)}")
+            btn.setToolTip(page_name)
+            # Ikonknapparna centreras när texten är borta, annars hamnar de
+            # olika långt in beroende på textens längd.
+            btn.setStyleSheet("text-align: center;" if not design.icon_only_sidebar(
+                self.window_config.width) else "")
+            self._apply_nav_icon(btn, page_name)
             btn.clicked.connect(lambda checked, idx=i: self._navigate_to_page(idx))
             self.nav_group.addButton(btn, i)
             self.sidebar_layout.addWidget(btn)
@@ -850,50 +1127,64 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(1000, self._update_schema_status)
 
     def _create_sidebar(self) -> QWidget:
-        """Skapa sidebar."""
+        """Skapa navigation som kan rullas om skärmen är för låg."""
+        from PySide6.QtWidgets import QScrollArea, QFrame
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        sidebar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        sidebar_scroll.setObjectName("Sidebar")
+        sidebar_scroll.setMinimumWidth(design.SIDEBAR_MIN_WIDTH)
+        sidebar_scroll.setMaximumWidth(design.sidebar_max_width(self.width()))
         sidebar = QWidget()
-        sidebar.setFixedWidth(self.window_config.sidebar_width)
-        sidebar.setStyleSheet("background: #14161a;")
+        sidebar.setObjectName("SidebarBody")
         self.sidebar_layout = QVBoxLayout(sidebar)
-        self.sidebar_layout.setContentsMargins(10, 20, 10, 20)
-        # Logo
-        app_name = get_config_value_safe(self.app, "app_name", "Fordonsregistrering")
+        self.sidebar_layout.setContentsMargins(10, 18, 10, 18)
+        # Samma symbol som på fönster och i systemfältet.
+        app_name = get_config_value_safe(self.app, "app_name", "Fordonsreg")
+        brand_row = QHBoxLayout()
+        brand_icon = QLabel()
+        pixmap = QApplication.windowIcon().pixmap(32, 32)
+        if not pixmap.isNull():
+            brand_icon.setPixmap(pixmap)
+            brand_icon.setToolTip("Fordonsreg")
+            brand_row.addWidget(brand_icon)
         logo = QLabel(app_name)
-        logo.setStyleSheet("font-size: 18px; font-weight: bold; color: #007bff;")
-        self.sidebar_layout.addWidget(logo)
+        logo.setObjectName("Brand")
+        logo.setWordWrap(True)
+        brand_row.addWidget(logo, 1)
+        self.sidebar_layout.addLayout(brand_row)
         self.sidebar_layout.addSpacing(20)
-        return sidebar
+        sidebar_scroll.setWidget(sidebar)
+        return sidebar_scroll
 
     def _add_stats_labels(self) -> None:
         """Lägg till statistik-labels i sidebar."""
         # Schema-status
-        schema_header = QLabel("📋 TS Schema")
-        schema_header.setStyleSheet("color: #888; font-size: 12px; margin-top: 10px;")
+        schema_header = QLabel("TS SCHEMA")
+        schema_header.setObjectName("SidebarSection")
         self.sidebar_layout.addWidget(schema_header)
         self.schema_status = QLabel("Laddar...")
-        # BUGG #3 FIXAD: word-wrap borttagen från stylesheet
-        # Använder setWordWrap(True) via Python istället
-        self.schema_status.setStyleSheet("color: #aaa; font-size: 11px;")
+        self.schema_status.setObjectName("SidebarStat")
         self.schema_status.setWordWrap(True)
         self.sidebar_layout.addWidget(self.schema_status)
         # Fordons-statistik
-        stats_header = QLabel("📊 Statistik")
-        stats_header.setStyleSheet("color: #888; font-size: 12px; margin-top: 10px;")
+        stats_header = QLabel("STATISTIK")
+        stats_header.setObjectName("SidebarSection")
         self.sidebar_layout.addWidget(stats_header)
         self.stats_info = QLabel("Laddar...")
-        # BUGG #3 FIXAD: word-wrap borttagen från stylesheet
-        # Använder setWordWrap(True) via Python istället
-        self.stats_info.setStyleSheet("color: #aaa; font-size: 11px;")
+        self.stats_info.setObjectName("SidebarStat")
         self.stats_info.setWordWrap(True)
         self.sidebar_layout.addWidget(self.stats_info)
 
     def _init_menu(self) -> None:
         """Initiera menybar."""
         menubar = self.menuBar()
-        menubar.setStyleSheet(MENUBAR_STYLE)
-        # Menyer
+        # Menyraden får sitt utseende från programmets gemensamma stilark.
         self._create_file_menu(menubar)
         self._create_schema_menu(menubar)
+        self._create_view_menu(menubar)
         self._create_settings_menu(menubar)
         self._create_tools_menu(menubar)
         self._create_help_menu(menubar)
@@ -901,9 +1192,15 @@ class MainWindow(QMainWindow):
     def _create_file_menu(self, menubar: QMenuBar) -> None:
         """Skapa Arkiv-meny."""
         file_menu = menubar.addMenu("Arkiv")
+        file_menu.addAction("📥 Importera fil...", self._import_file_dialog)
         file_menu.addAction("📤 Exportera fordonsdata...", self._export_vehicle_data)
         file_menu.addSeparator()
-        file_menu.addAction("🚪 Avsluta", self.close)
+        file_menu.addAction("🚪 Avsluta", self._quit_application)
+
+    def _import_file_dialog(self) -> None:
+        from plugins.main_gui.dialogs.import_dialog import start_import
+        start_import(self, self.app, self.vehicle_data_page,
+                     self.page_widgets.get("🏢 Återförsäljare"))
 
     def _create_schema_menu(self, menubar: QMenuBar) -> None:
         """Skapa Schema-meny."""
@@ -914,28 +1211,687 @@ class MainWindow(QMainWindow):
         schema_menu.addAction("ℹ️ Visa schema-info...", self._show_schema_info)
         schema_menu.addAction("📊 Jämför versioner...", self._compare_versions_dialog)
 
+    def _create_view_menu(self, menubar: QMenuBar) -> None:
+        """Skapa Visa-menyn med tema, textstorlek och fönsteråterställning."""
+        view_menu = menubar.addMenu("Visa")
+        theme_menu = view_menu.addMenu("Tema")
+        theme_menu.setIcon(self._menu_icon("theme-auto"))
+        self._theme_actions = {}
+        from PySide6.QtGui import QActionGroup
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        for mode in design.THEME_MODES:
+            action = QAction(design.THEME_LABELS[mode], self)
+            action.setCheckable(True)
+            action.setData(mode)
+            icon = self._menu_icon(f"theme-{mode}")
+            if not icon.isNull():
+                action.setIcon(icon)
+            action.setStatusTip(f"Använd {design.THEME_LABELS[mode].lower()} tema")
+            action.triggered.connect(lambda checked=False, value=mode: self._set_theme_mode(value))
+            group.addAction(action)
+            theme_menu.addAction(action)
+            self._theme_actions[mode] = action
+
+        density_menu = view_menu.addMenu("Densitet")
+        self._density_actions = {}
+        from PySide6.QtGui import QActionGroup as _DensityGroup
+        density_group = _DensityGroup(self)
+        density_group.setExclusive(True)
+        for mode in design.DENSITY_MODES:
+            action = QAction(design.DENSITY_LABELS[mode], self)
+            action.setCheckable(True)
+            action.setData(mode)
+            action.setStatusTip("Kompakt läge ger fler rader och mindre luft")
+            action.triggered.connect(lambda checked=False, value=mode: self._set_density(value))
+            density_group.addAction(action)
+            density_menu.addAction(action)
+            self._density_actions[mode] = action
+
+        rows_menu = view_menu.addMenu("Radhöjd i tabeller")
+        self._row_actions = {}
+        for mode in design.TABLE_ROW_MODES:
+            action = QAction(design.TABLE_ROW_LABELS[mode], self)
+            action.setCheckable(True)
+            action.setStatusTip(f"{design.row_height(mode)} pixlar per rad")
+            action.triggered.connect(lambda checked=False, value=mode: self._set_row_mode(value))
+            rows_menu.addAction(action)
+            self._row_actions[mode] = action
+        wrap_action = QAction("Bryt lång text i celler", self)
+        wrap_action.setCheckable(True)
+        wrap_action.setStatusTip("Visa hela värdet i stället för att klippa det")
+        wrap_action.triggered.connect(lambda checked=False: self._set_word_wrap(checked))
+        rows_menu.addSeparator()
+        rows_menu.addAction(wrap_action)
+        self._wrap_action = wrap_action
+
+        scale_menu = view_menu.addMenu("Skala gränssnittet")
+        self._scale_actions = {}
+        for value in design.scale_steps():
+            action = QAction(f"{int(round(value * 100))} %", self)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked=False, step=value: self._set_ui_scale(step))
+            scale_menu.addAction(action)
+            self._scale_actions[value] = action
+
+        text_menu = view_menu.addMenu("Textstorlek")
+        for label, size in (("Mindre", design.clamp_font_size(self._font_size() - 1)),
+                            ("Standard", design.DEFAULT_FONT_SIZE),
+                            ("Större", design.clamp_font_size(self._font_size() + 1))):
+            action = QAction(f"{label} ({size} pt)", self)
+            action.triggered.connect(lambda checked=False, value=size: self._set_font_size(value))
+            text_menu.addAction(action)
+        view_menu.addSeparator()
+        scaling = view_menu.addAction("Skalningstest…")
+        scaling.setStatusTip("Kontrollera att ingen text klipps vid 100–200 %")
+        scaling.triggered.connect(self._show_scaling_audit)
+        contrast = view_menu.addAction("Kontrastkontroll…")
+        contrast.setStatusTip("Visa kontrasten för alla text- och bakgrundspar")
+        contrast.triggered.connect(self._show_contrast_check)
+        reset = view_menu.addAction("Anpassa fönstret till skärmen")
+        reset.setStatusTip("Räkna om storleken efter den skärm fönstret ligger på")
+        reset.triggered.connect(self._fit_window_to_screen)
+        self._refresh_theme_actions()
+
+    def _refresh_theme_actions(self) -> None:
+        """Markera det tema, den densitet och den skalning som används."""
+        if getattr(self, "_theme_actions", None):
+            current = self._theme_mode()
+            for mode, action in self._theme_actions.items():
+                action.setChecked(mode == current)
+        if getattr(self, "_density_actions", None):
+            current_density = self._density_mode()
+            for mode, action in self._density_actions.items():
+                action.setChecked(mode == current_density)
+        if getattr(self, "_row_actions", None):
+            current_row = self._row_mode()
+            for mode, action in self._row_actions.items():
+                action.setChecked(mode == current_row)
+        if getattr(self, "_wrap_action", None) is not None:
+            self._wrap_action.setChecked(self._wrap_enabled())
+        if getattr(self, "_scale_actions", None):
+            current_scale = round(self._ui_scale(), 2)
+            for value, action in self._scale_actions.items():
+                action.setChecked(abs(value - current_scale) < 0.001)
+
+    def _set_density(self, mode: str) -> None:
+        """Spara och tillämpa vald densitet direkt."""
+        if mode not in design.DENSITY_MODES:
+            return
+        set_config_value_safe(self.app, "ui.density", mode)
+        _log.info("Densitet vald: %s", mode)
+        self._appearance_changed()
+
+    def _set_ui_scale(self, value: float) -> None:
+        """Spara och tillämpa vald skalning direkt."""
+        step = design.clamp_scale(value)
+        set_config_value_safe(self.app, "ui.scale", step)
+        _log.info("Gränssnittet skalas till %.2f", step)
+        self._appearance_changed()
+
+    def _set_row_mode(self, mode: str) -> None:
+        """Radhöjd i tabeller: kompakt, normal eller luftig (förslag 8)."""
+        if mode not in design.TABLE_ROW_MODES:
+            return
+        set_config_value_safe(self.app, "ui.row_height", mode)
+        self._row_mode = mode
+        self._appearance_changed()
+
+    def _set_word_wrap(self, enabled: bool) -> None:
+        """Textbrytning i celler, så att långa värden syns hela (förslag 8)."""
+        set_config_value_safe(self.app, "ui.word_wrap", bool(enabled))
+        self._word_wrap = bool(enabled)
+        self._appearance_changed()
+
+    def _row_mode(self) -> str:
+        """Läst radhöjd, med de gamla värdena kvar som alias."""
+        try:
+            value = get_config_value_safe(self.app, "ui.row_height", "")
+        except Exception:
+            value = ""
+        if not value:
+            # Utan eget val följer radhöjden densiteten.
+            return "compact" if self._density == "compact" else "normal"
+        return design.resolve_row_mode(value)
+
+    def _wrap_enabled(self) -> bool:
+        """Läst textbrytning. Standard: på, utom i kompakt läge."""
+        try:
+            return bool(get_config_value_safe(self.app, "ui.word_wrap",
+                                             self._density != "compact"))
+        except Exception:
+            return self._density != "compact"
+
+    def _show_scaling_audit(self) -> None:
+        """Mät fönstret och rapportera text som klipps (förslag 4)."""
+        from core import layout_audit
+        levels = layout_audit.scaling_levels()
+        results = [layout_audit.audit_widget(self, level) for level in levels]
+        lines = []
+        for row in results:
+            head = f"{row['scale']} %: {'OK' if row['ok'] else 'problem'}"
+            lines.append(head)
+            for item in row["clipped"][:12]:
+                text_preview = item['text']
+                lines.append(f"    klippt: {item['widget']} – "
+                             f"\"{text_preview}\" behöver {item['needed']} px, "
+                             f"har {item['available']} px")
+            if row["overflow"]:
+                lines.append(f"    tabellen är {row['overflow']} px bredare än vyn")
+        text = "\n".join(lines)
+        summary = layout_audit.summary_text(results[-1:]) if results else "Inget att mäta."
+        box = QMessageBox(self)
+        box.setWindowTitle("Skalningstest")
+        box.setIcon(QMessageBox.Icon.Information if all(r["ok"] for r in results)
+                    else QMessageBox.Icon.Warning)
+        box.setText("Kontroll av text och tabeller vid olika skalning")
+        box.setInformativeText(summary)
+        box.setDetailedText(text)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.exec()
+
+    def _show_screenshot(self) -> None:
+        """Skärmbild av fönstret med PIN-fält maskade (förslag 25)."""
+        from plugins.main_gui.dialogs.screenshot_dialog import ScreenshotDialog
+        dialog = ScreenshotDialog(self, self._root(), self)
+        dialog.exec()
+
+    def _show_contrast_check(self) -> None:
+        """Visa kontrasten för alla text- och bakgrundspar (förslag 22)."""
+        rows = []
+        for theme in ("dark", "light"):
+            rows.extend(design.contrast_report(theme))
+        problems = [row for row in rows if not row["passes"]]
+        lines = []
+        for row in rows:
+            mark = "OK" if row["passes"] else "FÖR LÅG"
+            lines.append(f"{design.THEME_LABELS.get(row['theme'], row['theme']):<6} "
+                         f"{row['label']:<30} {row['ratio']:.2f}:1  (krav {row['required']:.1f})  {mark}")
+        text = "\n".join(lines)
+        if problems:
+            text += f"\n\n{len(problems)} par ligger under kravet och bör justeras."
+        else:
+            text += "\n\nAlla par klarar WCAG-kravet för sin typ."
+        box = QMessageBox(self)
+        box.setWindowTitle("Kontrastkontroll")
+        box.setIcon(QMessageBox.Icon.Warning if problems else QMessageBox.Icon.Information)
+        box.setText("Kontrast i mörkt och ljust tema")
+        box.setInformativeText("Text kräver 4,5:1 och ramar 3:1 enligt WCAG 2.1 AA.")
+        box.setDetailedText(text)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.exec()
+
+    def _set_theme_mode(self, mode: str) -> None:
+        """Spara och tillämpa valt tema direkt."""
+        if mode not in design.THEME_MODES:
+            return
+        set_config_value_safe(self.app, "ui.theme", mode)
+        _log.info("Tema valt: %s", mode)
+        self._appearance_changed()
+
+    def _set_font_size(self, size: int) -> None:
+        """Spara och tillämpa vald textstorlek direkt."""
+        value = design.clamp_font_size(size)
+        set_config_value_safe(self.app, "ui.font_size", value)
+        _log.info("Textstorlek vald: %d pt", value)
+        self._appearance_changed()
+
+    def _fit_window_to_screen(self) -> None:
+        """Anpassa fönstret till skärmen det ligger på."""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        width, height = design.window_size(available.width(), available.height())
+        self.window_config = WindowConfig(width=width, height=height,
+                                          sidebar_width=design.sidebar_width(width))
+        self.resize(width, height)
+        # Bredden sätts på delaren, så att användaren fortfarande kan dra i den.
+        if getattr(self, "main_splitter", None) is not None:
+            self.main_splitter.setSizes([self.window_config.sidebar_width,
+                                         max(200, width - self.window_config.sidebar_width)])
+
+    def _menu_icon(self, name: str):
+        """Ikon till menyval, ritad i skärmens upplösning."""
+        from PySide6.QtGui import QIcon
+        icon = design.icon(self._root(), name, getattr(self, "_theme", "dark"),
+                           design.ICON_SIZE_REGULAR, widget=self)
+        return icon if icon is not None else QIcon()
+
+    def _apply_nav_icon(self, button: QPushButton, page_name: str) -> None:
+        """Sätt temafärgad ikon på en sidomenyknapp.
+
+        Ikonen ritas i 24 px och visas i 16 px i den smala menyn. Den ritas i
+        skärmens egen upplösning, så den blir lika skarp som texten bredvid.
+        """
+        size = design.icon_size("sidebar")
+        icon = design.icon(self._root(), design.page_icon(page_name),
+                           getattr(self, "_theme", "dark"), design.ICON_SIZE_REGULAR,
+                           widget=button)
+        if icon is not None:
+            button.setIcon(icon)
+            button.setIconSize(QSize(size, size))
+
+    def _refresh_nav_icons(self) -> None:
+        """Rita om sidomenyns ikoner när temat ändras."""
+        buttons = getattr(self, "nav_group", None)
+        if buttons is None or not self.pages:
+            return
+        for index, (page_name, _widget) in enumerate(self.pages):
+            button = buttons.button(index)
+            if button is not None:
+                self._apply_nav_icon(button, page_name)
+
+    def _root(self):
+        """Programmets rotmapp, för ikoner och resurser."""
+        return Path(__file__).resolve().parents[2]
+
     def _create_settings_menu(self, menubar: QMenuBar) -> None:
         """Skapa Inställningar-meny."""
         settings_menu = menubar.addMenu("Inställningar")
-        settings_menu.addAction("🔐 Byt Lösenord...", self._change_password)
+        settings_menu.addAction("🔐 Gemensam PIN-kod...", self._settings_shared_pin)
         settings_menu.addAction("🔢 Hantera FilID-serie...", self._manage_file_id)
-        settings_menu.addSeparator()
-        settings_menu.addAction("🚗 Fordonsdata PIN...", self._change_vehicle_pin)
+
+    def _settings_shared_pin(self) -> None:
+        from plugins.main_gui.dialogs.dealer_pin import change_pin
+        dealer = get_plugin_safe(self.app, "dealers_manager") or getattr(self.app, "dealers", None)
+        if dealer is None:
+            show_error(self, "PIN", "Den gemensamma PIN-hanteraren är inte tillgänglig.")
+            return
+        change_pin(self, dealer)
+
+    def _check_pin_reminder(self) -> None:
+        # Stör inte en app som startar minimerad; påminn när fönstret används.
+        if not self.isVisible() or self.isMinimized():
+            return
+        dealer = get_plugin_safe(self.app, "dealers_manager") or getattr(self.app, "dealers", None)
+        if dealer is None:
+            return
+        try:
+            manager = dealer.dealer_pin()
+            if not manager.reminder_due():
+                return
+            manager.mark_reminded()
+            answer = QMessageBox.question(self, "Byt PIN-kod",
+                "Det är minst en månad sedan PIN-koden byttes. Vill du byta den nu? "
+                "Du kan välja Nej och ändra den senare i Inställningar.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer == QMessageBox.Yes:
+                self._settings_shared_pin()
+        except Exception as exc:
+            _log.warning("PIN-påminnelsen kunde inte kontrolleras: %s", exc)
 
     def _create_tools_menu(self, menubar: QMenuBar) -> None:
         """Skapa Verktyg-meny."""
         tools_menu = menubar.addMenu("Verktyg")
+        tools_menu.addAction("🔎 Sök i allt (Ctrl+K)...", self._show_global_search)
+        tools_menu.addAction("📊 Översikt...", self._show_dashboard)
+        tools_menu.addAction("📁 Bevakad mapp...", self._show_watched_folder)
+        tools_menu.addSeparator()
+        tools_menu.addAction("🧾 Verifiera TS-underlag...", self._show_ts_verification)
+        tools_menu.addSeparator()
         tools_menu.addAction("🔍 Validera VIN...", self._validate_vin_dialog)
         tools_menu.addAction("📊 Visa statistik...", self._show_statistics)
         tools_menu.addSeparator()
         tools_menu.addAction("🔄 Uppdatera cache", self._refresh_cache)
         tools_menu.addAction("🔧 Bygg om index", self._rebuild_index)
+        tools_menu.addSeparator()
+        tools_menu.addAction("📋 Visa felsökningslogg...", self._show_error_log)
+        tools_menu.addAction("🧭 Felkodsguide...", self._show_error_guide)
+        tools_menu.addSeparator()
+        tools_menu.addAction("🧠 Visa inlärning...", self._show_learning_info)
+        tools_menu.addAction("⏯ Aktivera eller pausa inlärning", self._toggle_learning)
+        tools_menu.addAction("🗑 Rensa inlärda förslag...", self._clear_learning)
+
+    def _learning_store(self):
+        from core.learning import LearningStore
+        return LearningStore(Path(__file__).resolve().parents[2] / "json" / "mappings" / "learning.json")
+
+    def _show_learning_info(self) -> None:
+        try:
+            status = self._learning_store().status()
+            state = "aktiv" if status["enabled"] else "pausad"
+            QMessageBox.information(self, "Inlärning",
+                f"Inlärning är {state}.\n"
+                f"Sparade rubrikregler: {status['rules']}, motsägande regler: {status['conflicts']}.\n\n"
+                "Fordonsreg lär sig kolumnmappningar för Fordonsdata och Återförsäljare. "
+                "Den sparar inga rader eller PIN-koder. Du granskar alltid mappningen. "
+                "Andra funktioner och TS-formatet lär sig inte automatiskt ännu.")
+        except Exception as exc:
+            _log.warning("Kunde inte läsa inlärningsstatus: %s", exc)
+            QMessageBox.warning(self, "Inlärning", f"Kunde inte läsa inlärningsminnet: {exc}")
+
+    def _toggle_learning(self) -> None:
+        try:
+            store = self._learning_store()
+            enabled = not store.status()["enabled"]
+            store.set_enabled(enabled)
+            QMessageBox.information(self, "Inlärning", "Inlärning aktiverad." if enabled else "Inlärning pausad. Inlärda förslag bevaras men används inte; manuellt sparade mappningar påverkas inte.")
+        except Exception as exc:
+            _log.warning("Kunde inte ändra inlärning: %s", exc)
+            QMessageBox.warning(self, "Inlärning", f"Kunde inte ändra inställningen: {exc}")
+
+    def _clear_learning(self) -> None:
+        try:
+            answer = QMessageBox.question(self, "Rensa inlärning",
+                "Rensa alla automatiskt inlärda förslag? Namngivna och PIN-skyddade mappningar ändras inte.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self._learning_store().clear()
+                QMessageBox.information(self, "Inlärning", "De inlärda förslagen har rensats.")
+        except Exception as exc:
+            _log.warning("Kunde inte rensa inlärning: %s", exc)
+            QMessageBox.warning(self, "Inlärning", f"Kunde inte rensa inlärningsminnet: {exc}")
+
+    def _show_error_guide(self) -> None:
+        from plugins.main_gui.dialogs.error_guide_dialog import ErrorGuideDialog
+        ErrorGuideDialog(self).exec()
+
+    def _show_error_log(self) -> None:
+        """Öppna den gemensamma felloggen i en skrivskyddad vy."""
+        try:
+            from plugins.main_gui.dialogs.error_log_dialog import ErrorLogDialog
+            if self._error_log_dialog is None:
+                self._error_log_dialog = ErrorLogDialog(self)
+            self._error_log_dialog.reload()
+            self._error_log_dialog.show()
+            self._error_log_dialog.raise_()
+            self._error_log_dialog.activateWindow()
+        except Exception as exc:
+            _log.exception("Kunde inte öppna felsökningsloggen")
+            QMessageBox.warning(self, "Felsökningslogg", f"Kunde inte öppna loggen: {exc}")
 
     def _create_help_menu(self, menubar: QMenuBar) -> None:
         """Skapa Hjälp-meny."""
         help_menu = menubar.addMenu("Hjälp")
         help_menu.addAction("📖 Manual", self._show_manual)
+        help_menu.addAction("📸 Skärmbild för support...", self._show_screenshot)
+        help_menu.addAction("📜 Licens och användningsvillkor...", self._show_license)
+        help_menu.addAction("💙 Stöd Fordonsreg (donation)...", self._show_swish_qr)
+        help_menu.addSeparator()
         help_menu.addAction("ℹ️ Om programmet", self._show_about)
+
+    def _show_license(self) -> None:
+        from plugins.main_gui.dialogs.license_dialog import show_license
+        show_license(self)
+
+    def _show_swish_qr(self) -> None:
+        from plugins.main_gui.dialogs.swish_qr_dialog import SwishQrDialog
+        SwishQrDialog(self).exec()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Sökning, översikt, bevakad mapp och starthälsa
+
+    def _setup_shortcuts(self) -> None:
+        """Ctrl+K ska fungera även när fokus ligger i en tabell."""
+        shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
+        shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        shortcut.activated.connect(self._show_global_search)
+        self._search_shortcut = shortcut
+
+    def _root(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    def _show_global_search(self) -> None:
+        from plugins.main_gui.dialogs.global_search_dialog import GlobalSearchDialog
+        GlobalSearchDialog(self, on_open_vehicle=self._open_vehicle_from_search).exec()
+
+    def _open_vehicle_from_search(self, year: int, row: int) -> None:
+        """Öppna rätt år och markera posten som sökträffen pekar på."""
+        page = self.vehicle_data_page
+        if page is None:
+            QMessageBox.information(self, "Sökning", "Fordonsdata är inte tillgängligt.")
+            return
+        try:
+            self._navigate_to_named_page("Fordonsdata")
+            opener = getattr(page, "open_year", None)
+            if callable(opener):
+                tab = opener(int(year))
+            else:
+                tab = None
+            if tab is not None and hasattr(tab, "select_row"):
+                tab.select_row(int(row))
+        except Exception as exc:
+            _log.warning("Sökträffen kunde inte öppnas: %s", exc)
+            QMessageBox.warning(self, "Sökning", f"Posten kunde inte öppnas: {exc}")
+
+    def _navigate_to_named_page(self, name: str) -> None:
+        widget = self.page_widgets.get(name)
+        if widget is None:
+            return
+        index = self.stack.indexOf(widget)
+        if index >= 0:
+            self._navigate_to_page(index)
+
+    def _show_dashboard(self) -> None:
+        from plugins.main_gui.dialogs.dashboard_dialog import DashboardDialog
+        self._dashboard_pending = False
+        DashboardDialog(self).exec()
+
+    def _show_ts_verification(self) -> None:
+        from plugins.main_gui.dialogs.ts_verification_dialog import TsVerificationDialog
+        TsVerificationDialog(self).exec()
+
+    def _show_watched_folder(self) -> None:
+        from plugins.main_gui.dialogs.watched_folder_dialog import WatchedFolderDialog
+        dialog = WatchedFolderDialog(self)
+        if dialog.exec() and dialog.changed:
+            self._reload_watched_folder()
+
+    def _watched_settings_path(self) -> Path:
+        return self._root() / "json" / "watched_folder.json"
+
+    def _setup_watched_folder(self) -> None:
+        """Kontrollera mappen då och då. Ingenting importeras automatiskt."""
+        self._watched_timer = QTimer(self)
+        self._watched_timer.timeout.connect(self._check_watched_folder)
+        self._watched_timer.start(30000)
+        QTimer.singleShot(6000, self._check_watched_folder)
+
+    def _reload_watched_folder(self) -> None:
+        self._check_watched_folder(force=True)
+
+    def _check_watched_folder(self, force: bool = False) -> None:
+        try:
+            from core.watched_folder import load_settings, mark_reported, save_settings, scan
+            settings = load_settings(self._watched_settings_path())
+            new_files = scan(settings)
+            if not new_files:
+                return
+            settings = mark_reported(settings, new_files)
+            save_settings(self._watched_settings_path(), settings)
+            self._watched_pending = new_files
+            names = ", ".join(item["name"] for item in new_files[:3])
+            more = "" if len(new_files) <= 3 else f" (+{len(new_files) - 3} fler)"
+            if self._tray_icon is not None and self._tray_icon.isVisible():
+                self._tray_icon.showMessage(
+                    "Ny importfil hittad", f"{names}{more}\nInget importeras automatiskt.",
+                    self._tray_icon.MessageIcon.Information, 8000)
+            else:
+                self.statusBar().showMessage(f"Ny importfil hittad: {names}{more}", 8000)
+        except Exception as exc:
+            _log.warning("Bevakad mapp kunde inte kontrolleras: %s", exc)
+
+    def _confirm_startup_health(self) -> None:
+        try:
+            from core.startup_health import confirm_healthy
+            if confirm_healthy(self._root()):
+                _log.info("Starten bekräftad efter uppdatering")
+        except Exception as exc:
+            _log.warning("Startbekräftelsen kunde inte sparas: %s", exc)
+
+    def moveEvent(self, event) -> None:
+        """Kom ihåg fönstrets placering, men spara inte vid varje pixel."""
+        super().moveEvent(event)
+        self._schedule_geometry_save()
+
+    def _schedule_geometry_save(self) -> None:
+        """Spara fönstrets geometri en kort stund efter sista ändringen."""
+        timer = getattr(self, "_geometry_timer", None)
+        if timer is None:
+            self._geometry_timer = QTimer(self)
+            self._geometry_timer.setSingleShot(True)
+            self._geometry_timer.setInterval(700)
+            self._geometry_timer.timeout.connect(self._save_geometry)
+            timer = self._geometry_timer
+        timer.start()
+
+    def _save_geometry(self) -> None:
+        """Spara storlek och placering för den skärm fönstret ligger på."""
+        try:
+            screen = self.screen()
+            if screen is None or self.isMinimized():
+                return
+            geometry = self.geometry()
+            available = screen.availableGeometry()
+            layout_memory.save_screen_geometry(
+                self._root(), screen.name(),
+                width=geometry.width(), height=geometry.height(),
+                x=geometry.x() - available.x(), y=geometry.y() - available.y(),
+                maximized=self.isMaximized(),
+                used=datetime.now().isoformat(timespec="seconds"))
+        except Exception:
+            _log.debug("Fönstrets placering kunde inte sparas", exc_info=True)
+
+    def resizeEvent(self, event) -> None:
+        """Anpassa sidomenyn när fönstret ändrar bredd.
+
+        Layouten ska alltid passa: på en smal bärbar datorskärm blir menyn
+        smalare så att tabeller och formulär får plats, på en bred skärm får
+        menyn mer luft. Ingenting göms och inget kräver rullning i sidled.
+        """
+        super().resizeEvent(event)
+        self._fit_sidebar_to_window()
+        self._schedule_geometry_save()
+
+    def _fit_sidebar_to_window(self) -> None:
+        """Anpassa sidomenyn efter fönstrets bredd och vald densitet.
+
+        På smala skärmar visas bara ikoner (med sidnamnet som verktygstips), så
+        att innehållet får plats utan att något göms. Breda skärmar behåller
+        ikon + text.
+        """
+        sidebar = getattr(self, "sidebar", None)
+        if sidebar is None:
+            return
+        icon_only = design.icon_only_sidebar(self.width())
+        user_width = getattr(self, "_sidebar_user_width", 0) or 0
+        if icon_only:
+            width = design.design_icon_width()
+        elif user_width:
+            # Användaren har dragit i kanten – behåll den bredden.
+            width = max(design.SIDEBAR_MIN_WIDTH,
+                        min(design.sidebar_max_width(self.width()), int(user_width)))
+        else:
+            width = design.sidebar_width(self.width())
+        # Automatisk densitet följer fönstret; ett eget val rörs inte.
+        if self._density_mode() == "auto":
+            density = design.resolve_density("auto", self.width(), self.height())
+            if density != getattr(self, "_density", density):
+                self._appearance_changed()
+                return
+        if (width == getattr(self, "window_config", WindowConfig()).sidebar_width
+                and icon_only == getattr(self, "_icon_only_sidebar", None)):
+            return
+        try:
+            self._icon_only_sidebar = icon_only
+            self.window_config.sidebar_width = width
+            # Delaren äger bredden: här sätts bara gränserna, så att den aldrig
+            # kan bli smalare än ikonerna eller ta mer än en tredjedel.
+            sidebar.setMinimumWidth(design.SIDEBAR_MIN_WIDTH)
+            sidebar.setMaximumWidth(design.sidebar_max_width(self.width()))
+            splitter = getattr(self, "main_splitter", None)
+            if splitter is not None:
+                sizes = splitter.sizes()
+                if sizes:
+                    sizes[0] = width
+                    splitter.setSizes(sizes)
+            layout = getattr(self, "sidebar_layout", None)
+            if layout is not None:
+                margin = 4 if icon_only else (6 if width < 200 else 10)
+                layout.setContentsMargins(margin, 18, margin, 18)
+            self._apply_nav_icon_mode(icon_only)
+        except Exception:
+            _log.debug("Sidomenyn kunde inte anpassas till fönsterbredden", exc_info=True)
+
+    def _on_sidebar_resized(self, position: int, _index: int) -> None:
+        """Användaren har dragit i sidomenyns kant – kom ihåg bredden."""
+        try:
+            width = int(position)
+        except (TypeError, ValueError):
+            return
+        if width < design.SIDEBAR_MIN_WIDTH:
+            return
+        self._sidebar_user_width = width
+        self._pending_sidebar_width = width
+        timer = getattr(self, "_sidebar_save_timer", None)
+        if timer is None:
+            self._sidebar_save_timer = QTimer(self)
+            self._sidebar_save_timer.setSingleShot(True)
+            self._sidebar_save_timer.setInterval(800)
+            self._sidebar_save_timer.timeout.connect(self._save_sidebar_width)
+            timer = self._sidebar_save_timer
+        timer.start()
+        self._apply_nav_icon_mode(design.icon_only_sidebar(width))
+
+    def _save_sidebar_width(self) -> None:
+        """Spara den bredd användaren valt, så den gäller nästa gång."""
+        width = getattr(self, "_pending_sidebar_width", None)
+        if not width:
+            return
+        try:
+            set_config_value_safe(self.app, "ui.sidebar_width", int(width))
+            _log.info("Sidomenyns bredd sparad: %d px", int(width))
+        except Exception:
+            _log.debug("Sidomenyns bredd kunde inte sparas", exc_info=True)
+
+    def _apply_nav_icon_mode(self, icon_only: bool) -> None:
+        """Visa bara ikoner i sidomenyn, eller ikon med text."""
+        group = getattr(self, "nav_group", None)
+        if group is None or not getattr(self, "pages", None):
+            return
+        for index, (page_name, _widget) in enumerate(self.pages):
+            button = group.button(index)
+            if button is None:
+                continue
+            label = design.strip_emoji_prefix(page_name)
+            button.setText("" if icon_only else label)
+            # Ikonen centreras när texten är borta, annars linjerar den snett.
+            button.setStyleSheet("text-align: center;" if icon_only else "")
+            button.setToolTip(label)
+            design.set_accessible(button, design.label_for_icon_button(label), f"Öppna {label}")
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # Startar alltid minimerat: syns fönstret ändå under startfasen
+        # minimeras det direkt, så att ingen ruta hinner bli störande.
+        if self._startup_phase:
+            self._startup_phase = False
+            if not self.isMinimized():
+                self.showMinimized()
+                if self._can_hide_to_tray():
+                    self.hide()
+                return
+        # Panelen visas först när fönstret faktiskt öppnas, så att starten
+        # aldrig stör.
+        if self._dashboard_pending and self.isVisible() and not self.isMinimized():
+            self._dashboard_pending = False
+            QTimer.singleShot(400, self._show_dashboard)
+
+    def closeEvent(self, event) -> None:
+        if not self._quit_requested and self._can_hide_to_tray():
+            event.ignore()
+            self.hide()
+            return
+        page = self.vehicle_data_page
+        if page is not None and hasattr(page, "confirm_close"):
+            if not page.confirm_close():
+                event.ignore()
+                return
+        super().closeEvent(event)
+        if event.isAccepted() and self._tray_icon is not None:
+            self._tray_icon.hide()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Navigation & Updates
@@ -1015,18 +1971,24 @@ class MainWindow(QMainWindow):
         """Uppdatera schema-status i sidebar."""
         try:
             schema_info = get_schema_info_safe(self.app)
-            if schema_info.is_active:
+            from core.ts_safety import generation_block_reason
+            colors = design.palette(getattr(self, "_theme", "dark"))
+            if generation_block_reason():
+                schema_text = f"Schema: {schema_info.version}" if schema_info.is_active else "Ingen version aktiv"
+                self.schema_status.setText(f"TS-generering spärrad\n{schema_text}")
+                self.schema_status.setStyleSheet(f"color: {colors['warning']};")
+            elif schema_info.is_active:
                 post_types_str = ", ".join(schema_info.post_types)
                 self.schema_status.setText(
-                    f"✓ {schema_info.version}\n{post_types_str or f'{schema_info.post_count} posttyper'}"
+                    f"{schema_info.version}\n{post_types_str or f'{schema_info.post_count} posttyper'}"
                 )
-                self.schema_status.setStyleSheet("color: #28a745; font-size: 11px;")
+                self.schema_status.setStyleSheet(f"color: {colors['success']};")
             else:
-                self.schema_status.setText("⚠ Ingen version aktiv\nImportera TS-spec")
-                self.schema_status.setStyleSheet("color: #ffc107; font-size: 11px;")
+                self.schema_status.setText("Ingen version aktiv\nImportera TS-spec")
+                self.schema_status.setStyleSheet(f"color: {colors['warning']};")
         except Exception as e:
-            self.schema_status.setText(f"❌ Fel: {str(e)[:20]}")
-            self.schema_status.setStyleSheet("color: #dc3545; font-size: 11px;")
+            self.schema_status.setText(f"Fel: {str(e)[:20]}")
+            self.schema_status.setStyleSheet(f"color: {design.palette(getattr(self, '_theme', 'dark'))['danger']};")
         # Uppdatera igen om 30 sekunder
         QTimer.singleShot(STATS_UPDATE_INTERVAL_MS, self._update_schema_status)
 
@@ -1069,58 +2031,22 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
 
     def _import_ts_schema_dialog(self) -> None:
-        """Dialog för att importera TS-schema."""
-        filepath, _ = QFileDialog.getOpenFileName(
-            self,
-            "Välj TS-spec Excel-fil",
-            "",
-            "Excel-filer (*.xlsx *.xls)",
-        )
+        """Importera en orörd underlagskopia; aktivera aldrig ett overifierat schema."""
+        filepath, _ = QFileDialog.getOpenFileName(self, "Importera TS-underlag från Excel", "",
+                                                  "Excel-filer (*.xlsx *.xlsm *.xls)")
         if not filepath:
             return
-        importer = get_plugin_safe(self.app, "ts_excel_importer")
-        if not importer:
-            show_error(
-                self,
-                "Plugin saknas",
-                "ts_excel_importer är inte tillgänglig.\n\n"
-                "Kontrollera att pluginen är installerad och aktiverad.",
-            )
-            return
         try:
-            success = False
-            if hasattr(importer, "import_from_excel"):
-                success = importer.import_from_excel(Path(filepath))
-            elif hasattr(importer, "parse_excel"):
-                specs = importer.parse_excel(Path(filepath))
-                if specs:
-                    schema_mgr = get_plugin_safe(self.app, "ts_schema_manager")
-                    if schema_mgr and hasattr(schema_mgr, "create_version"):
-                        version_name = Path(filepath).stem
-                        schema_mgr.create_version(
-                            version=version_name,
-                            specs=specs,
-                            source_file=str(filepath),
-                            set_active=True,
-                        )
-                        success = True
-            if success:
-                show_info(
-                    self,
-                    "Import klar",
-                    f"TS-schema importerat från:\n{filepath}",
-                )
-                self.refresh_all()
-            else:
-                show_error(
-                    self,
-                    "Import misslyckades",
-                    "Kunde inte importera schema.\n\n"
-                    "Kontrollera att filen har rätt format.",
-                )
-        except Exception as e:
-            _log.error("Failed to import TS schema: %s", e, exc_info=True)
-            show_error(self, "Import fel", f"Fel vid import:\n\n{e}")
+            from core.ts_source_import import import_source
+            root = Path(get_config_value_safe(self.app, "base_dir", ".") or ".")
+            result = import_source(Path(filepath), root / "data" / "ts_spec_underlag")
+            show_info(self, "Underlag importerat – ej verifierat",
+                "En oförändrad kopia har sparats för granskning. Inget TS-schema har aktiverats.\n\n"
+                + "Blad: " + ", ".join(result['sheets']) + "\n\n"
+                + "TS-generering är fortfarande spärrad tills hela underlaget har kontrollerats.")
+        except Exception as exc:
+            _log.warning("TS-underlag kunde inte importeras: %s", exc)
+            show_error(self, "Import misslyckades", str(exc))
 
     def _change_schema_version(self, version: str) -> None:
         """Byt aktiv schema-version."""
@@ -1579,7 +2505,7 @@ class MainWindow(QMainWindow):
 
     def _show_about(self) -> None:
         """Visa om-dialog."""
-        app_name = get_config_value_safe(self.app, "app_name", "Fordonsregistrering")
+        app_name = get_config_value_safe(self.app, "app_name", "Fordonsreg")
         app_version = get_config_value_safe(self.app, "app_version", __version__)
         app_author = get_config_value_safe(self.app, "app_author", "Rickard Längkvist")
         vehicle_plugin = get_plugin_safe(self.app, "vehicle_registry")
@@ -1602,19 +2528,24 @@ class MainWindow(QMainWindow):
 
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _get_pin_getter(self) -> Callable[[], str]:
-        """Returnera PIN-getter funktion."""
-        config = get_plugin_safe(self.app, "core_config")
-        def pin_getter() -> str:
-            if not config:
-                return "1234"
-            # Försök vehicle_data_pin först
-            vehicle_pin = get_config_value_safe(self.app, "vehicle_data_pin", None)
-            if vehicle_pin:
-                return vehicle_pin
-            # Fallback till main PIN
-            return self._get_pin_from_config(config)
-        return pin_getter
+    def _get_pin_getter(self) -> Callable:
+        """Begär gemensam PIN; äldre fordons-PIN verifieras vid övergång."""
+        def request(parent):
+            import hmac
+            from plugins.main_gui.dialogs.dealer_pin import request_migrated_pin
+            config = get_plugin_safe(self.app, "core_config")
+            dealer = get_plugin_safe(self.app, "dealers_manager") or getattr(self.app, "dealers", None)
+            if config is None or dealer is None:
+                show_error(parent, "PIN-skydd", "PIN-hanteraren eller tidigare inställningar är inte tillgängliga.")
+                return None
+            def identity_now():
+                value = get_config_value_safe(self.app, "vehicle_data_pin", None) or self._get_pin_from_config(config)
+                if not isinstance(value, str) or not value:
+                    raise ValueError("Den tidigare fordons-PIN-koden kan inte läsas")
+                return value
+            return request_migrated_pin(parent, dealer, "fordonsdata", identity_now,
+                lambda old: isinstance(old, str) and hmac.compare_digest(old, identity_now()), "Fordonsdata")
+        return request
 
     def _get_pin_from_config(self, config: Any) -> str:
         """Hämta PIN från config-plugin."""
@@ -1677,45 +2608,13 @@ class MainWindow(QMainWindow):
 # STYLESHEETS
 
 # ══════════════════════════════════════════════════════════════════════════════
-MAIN_STYLESHEET: Final[str] = """
-QMainWindow { background: #191b1f; color: #e0e0e0; }
-QWidget { font-family: 'Segoe UI', sans-serif; font-size: 14px; }
-QPushButton {
-    background: #3a3f44; color: white;
-    border-radius: 4px; padding: 8px 16px; border: 1px solid #555;
-}
-QPushButton:hover { background: #4a4f54; }
-QPushButton#PrimaryButton { background: #007bff; border-color: #007bff; }
-QPushButton#PrimaryButton:hover { background: #0056b3; }
-QPushButton#SuccessButton { background: #28a745; border-color: #28a745; }
-QPushButton#SuccessButton:hover { background: #218838; }
-QLabel#PageTitle { font-size: 22px; font-weight: bold; color: #ffffff; }
-QLineEdit, QComboBox, QTextEdit {
-    background: #2b2b2b; color: #fff;
-    border: 1px solid #444; border-radius: 4px; padding: 6px;
-}
-QLineEdit:focus { border-color: #007bff; }
-QGroupBox {
-    font-weight: bold; border: 1px solid #444;
-    border-radius: 6px; margin-top: 12px; padding-top: 10px;
-}
-QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
-"""
-SIDEBAR_BUTTON_STYLE: Final[str] = """
-QPushButton {
-    text-align: left; border: none; padding: 12px 10px; background: transparent;
-}
-QPushButton:checked {
-    background: #2a2d33; color: #fff; border-left: 3px solid #007bff;
-}
-QPushButton:hover { background: #1f2226; }
-"""
-MENUBAR_STYLE: Final[str] = """
-QMenuBar { background: #14161a; color: #fff; }
-QMenuBar::item:selected { background: #2a2d33; }
-QMenu { background: #2b2b2b; color: #fff; border: 1px solid #444; }
-QMenu::item:selected { background: #007bff; }
-"""
+# Stilarken byggs numera av core/theme.py så att mörkt och ljust tema har
+# samma mått och färger överallt. Konstanterna finns kvar som exporterade
+# standardvärden (mörkt tema) för kod som importerar dem direkt.
+MAIN_STYLESHEET: Final[str] = design.stylesheet("dark")
+SIDEBAR_BUTTON_STYLE: Final[str] = ""  # Sidomenyns knappar styrs av #NavButton
+MENUBAR_STYLE: Final[str] = design.menubar_stylesheet("dark")
+
 MANUAL_TEXT: Final[str] = """📖 SNABBGUIDE
 1. Fordonsdata: Hantera fordonsspecifikationer per år
 2. TS Schema: Importera och hantera TS-specifikationer

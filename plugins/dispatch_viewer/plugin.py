@@ -136,6 +136,7 @@ try:
 except ImportError:
     HAS_PYSIDE6: bool = False
 
+from plugins.gui_helpers.page_header import PageHeader
 from core.plugin_base import PluginBase
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -748,6 +749,7 @@ class Plugin(PluginBase):
                 return False
             self._current_data = df
             self._current_file = path.name
+            self._record_dispatch_colors(df)
             if self._widget:
                 self._widget.set_data(df, path.name)
             emit_event_safe(self.app, "dispatch:file_loaded", {
@@ -762,6 +764,38 @@ class Plugin(PluginBase):
                 "load_file misslyckades: %s", exc, exc_info=True
             )
             return False
+
+    def _record_dispatch_colors(self, df: Any) -> None:
+        # En kodkolumn är inte ett färgnamn. Använd inte tvetydiga rubriker.
+        aliases = {"color", "colour", "farg", "colorname", "colourname", "fargnamn"}
+        columns = [c for c in df.columns if self._norm_key(c) in aliases]
+        if len(columns) != 1:
+            if columns:
+                message = "Dispatch har flera möjliga färgnamnskolumner; inga färger sparades."
+                _log.warning(message)
+                if HAS_PYSIDE6 and self._widget:
+                    QMessageBox.warning(self._widget, "Dispatch-färger", message)
+            return
+        names = []
+        for value in df[columns[0]]:
+            if pd.isna(value):
+                continue
+            text = str(value).strip()
+            if text:
+                names.append(text)
+        if not names:
+            return
+        colors = getattr(self.app, "colors_manager", None) or get_plugin_safe(self.app, "colors_manager")
+        try:
+            if colors is None or not callable(getattr(colors, "record_dispatch_colors", None)):
+                raise RuntimeError("Färgfliken är inte tillgänglig")
+            result = colors.record_dispatch_colors(names)
+            if not result.success:
+                raise RuntimeError(result.message)
+        except Exception as exc:
+            _log.warning("Dispatch-färger sparades inte: %s", exc)
+            if HAS_PYSIDE6 and self._widget:
+                QMessageBox.warning(self._widget, "Dispatch-färger", f"Dispatch laddades, men färgerna kunde inte sparas: {exc}")
 
     def list_dispatch_files(self) -> List[Path]:
         """Listar alla dispatch-filer. KRASCHSÄKER."""
@@ -1034,6 +1068,7 @@ class Plugin(PluginBase):
                     )
             except Exception as exc:
                 _log.warning("  ❌ Fel i %s: %s", sheet_name, exc)
+        xls.close()
         if not all_data:
             return None
         df = pd.concat(all_data, ignore_index=True)
@@ -1192,7 +1227,7 @@ class Plugin(PluginBase):
             for col in df.columns:
                 if df[col].dtype == "object":
                     try:
-                        df[col] = df[col].astype(str).str.strip()
+                        df[col] = df[col].map(lambda value: value if pd.isna(value) else str(value).strip())
                     except Exception:
                         pass
         except Exception:
@@ -1312,12 +1347,10 @@ if HAS_PYSIDE6:
             layout.setSpacing(10)
 
             # ── TITEL ──
-            title = QLabel("📥 Dispatch Import")
-            title.setObjectName("PageTitle")
-            title_font = QFont()
-            title_font.setPointSize(18)
-            title_font.setBold(True)
-            title.setFont(title_font)
+            # Gemensamt sidhuvud (förslag 5).
+            title = PageHeader.build(
+                "Dispatch Import", "dispatch",
+                "Läs in Dispatch-filer utan att ändra originalet", self)
             layout.addWidget(title)
 
             # ── FIL-INFO ──

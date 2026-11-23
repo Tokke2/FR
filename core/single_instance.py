@@ -20,8 +20,7 @@ ANSVAR:
         * Linux/macOS: fcntl.flock på låsfil — OS släpper låset
                        automatiskt vid processdöd
 
-        * Fallback:    PID-fil med stale-detektering (om varken
-                       mutex eller flock är tillgängliga)
+        * Om säkert OS-lås saknas avbryts starten.
 
     - Andra instansen -> focus_existing() signalerar befintlig
       instans att visa sitt fönster (via trigger-fil som
@@ -29,13 +28,13 @@ ANSVAR:
 
     - Cleanup garanteras vid normal exit (atexit), vid signaler
       (SIGINT/SIGTERM/SIGBREAK) och är ofarlig vid krasch
-      (OS-låsen släpps av kerneln; stale PID-fil detekteras)
+      (OS-låsen släpps av kerneln; PID-filen är endast information)
 
 API (spec Sektion D):
 
     SingleInstance.acquire()        -> bool
     SingleInstance.release()        -> None
-    SingleInstance.focus_existing() -> None
+    SingleInstance.focus_existing() -> bool
 
 ANVÄNDNING (main.pyw):
 
@@ -72,7 +71,7 @@ KRASCHSÄKERHET:
 
     - Dubbel-release är ofarlig (idempotent)
 
-    - Stale PID-fil (process död) detekteras och tas över
+    - PID-filen är endast information; OS-låset styr start
 
     - Signalhanterare kedjar vidare till ev. tidigare hanterare
 
@@ -113,6 +112,7 @@ VERSION: Final[str] = "1.0.0"
 AUTHOR: Final[str] = "Rickard Längkvist"
 
 DEFAULT_LOCK_NAME: Final[str] = "ts_fordonsregistreringssystem"
+LAUNCHER_LOCK_NAME: Final[str] = DEFAULT_LOCK_NAME + "_launcher"
 SHOW_TRIGGER_SUFFIX: Final[str] = ".show"
 PID_SUFFIX: Final[str] = ".pid"
 LOCK_SUFFIX: Final[str] = ".lock"
@@ -173,51 +173,6 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
-def _pid_is_running(pid: int) -> bool:
-    """
-    Kontrollera om en process med givet PID lever. KRASCHSÄKER.
-    """
-
-    if pid <= 0:
-        return False
-
-    if IS_WINDOWS:
-        if not _HAS_CTYPES:
-            return False
-        try:
-            import ctypes
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            kernel32 = ctypes.windll.kernel32
-            handle = kernel32.OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION, False, pid
-            )
-            if handle:
-                # Kontrollera att processen inte är avslutad
-                exit_code = ctypes.c_ulong(0)
-                STILL_ACTIVE = 259
-                alive = False
-                if kernel32.GetExitCodeProcess(
-                    handle, ctypes.byref(exit_code)
-                ):
-                    alive = exit_code.value == STILL_ACTIVE
-                kernel32.CloseHandle(handle)
-                return alive
-            return False
-        except Exception:
-            return False
-    else:
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            # Processen finns men ägs av annan användare
-            return True
-        except Exception:
-            return False
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # SINGLE INSTANCE
 
@@ -229,9 +184,9 @@ class SingleInstance:
     Plattformsoberoende singelinstanslås.
 
     Låsstrategi (i prioritetsordning):
-      1. Windows: Named Mutex (Global\\<name>_mutex)
+      1. Windows: Named Mutex (Local\\<name>_mutex)
       2. POSIX:   fcntl.flock på <tempdir>/<name>.lock
-      3. Fallback: PID-fil med stale-detektering
+      Om inget säkert lås kan tas avbryts starten.
 
     Trådsäker. Idempotent release. Cleanup via atexit + signaler.
     """
@@ -261,7 +216,8 @@ class SingleInstance:
 
         self._lock = threading.RLock()
         self._acquired = False
-        self._method: str = "none"  # mutex | flock | pidfile | none
+        self.error: Optional[str] = None
+        self._method: str = "none"  # mutex | flock | none
 
         # Windows mutex-handle
         self._mutex_handle: Optional[int] = None
@@ -319,20 +275,19 @@ class SingleInstance:
                             self._post_acquire()
                         return ok
 
-                # Sista utväg: PID-fil
-                ok = self._acquire_pidfile()
-                if ok:
-                    self._method = "pidfile"
-                    self._post_acquire()
-                return ok
+                # En PID-fil är inte ett atomiskt lås och tillåter två
+                # samtidiga starter. Avbryt i stället vid låsfel.
+                self.error = "Inget säkert eninstanslås är tillgängligt"
+                _log.error(self.error)
+                return False
 
             except Exception as exc:
                 _log.error(
                     "Oväntat fel vid lås-förvärv: %s",
                     exc, exc_info=True,
                 )
-                # Hellre tillåta start än att blockera felaktigt
-                return True
+                self.error = f"Eninstanslåset misslyckades: {exc}"
+                return False
 
     def release(self) -> None:
         """
@@ -348,12 +303,10 @@ class SingleInstance:
             if self._mutex_handle is not None:
                 try:
                     import ctypes
-                    ctypes.windll.kernel32.ReleaseMutex(
-                        self._mutex_handle
-                    )
-                    ctypes.windll.kernel32.CloseHandle(
-                        self._mutex_handle
-                    )
+                    kernel32 = ctypes.windll.kernel32
+                    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+                    kernel32.CloseHandle.restype = ctypes.c_int
+                    kernel32.CloseHandle(self._mutex_handle)
                 except Exception as exc:
                     _log.debug("Mutex-release fel: %s", exc)
                 self._mutex_handle = None
@@ -369,10 +322,8 @@ class SingleInstance:
                 except Exception as exc:
                     _log.debug("flock-release fel: %s", exc)
                 self._flock_file = None
-                try:
-                    self._lock_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                # Behall lasfilen: att ta bort den kan skapa tva olika
+                # inoder om en annan process vantar pa samma flock.
 
             # PID-fil (tas alltid bort om den är vår)
             try:
@@ -385,19 +336,28 @@ class SingleInstance:
             except Exception as exc:
                 _log.debug("PID-fil-cleanup fel: %s", exc)
 
-            # Show-trigger städas
-            try:
-                self._show_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            # En begäran kan ha kommit under start/överlämning. Lämna
+            # triggern tills GUI:t har hunnit ta emot den.
 
             self._acquired = False
             _log.info(
                 "Singelinstanslås släppt (%s)", self._method,
             )
             self._method = "none"
+            for sig, previous in self._prev_handlers.items():
+                try:
+                    if signal.getsignal(sig) == self._signal_handler:
+                        signal.signal(sig, previous)
+                except (ValueError, OSError, RuntimeError):
+                    pass
+            self._prev_handlers.clear()
+            self._cleanup_registered = False
+            try:
+                atexit.unregister(self.release)
+            except Exception:
+                pass
 
-    def focus_existing(self) -> None:
+    def focus_existing(self) -> bool:
         """
         Signalera den redan körande instansen att visa sitt
         fönster. KRASCHSÄKER.
@@ -417,10 +377,12 @@ class SingleInstance:
                 "(%s)",
                 self._show_path,
             )
+            return True
         except Exception as exc:
             _log.error(
                 "Kunde inte signalera befintlig instans: %s", exc,
             )
+            return False
 
     # ──────────────────────────────────────────────────────────────────
     # FOCUS-POLLING (anropas av huvudinstansen, t.ex. via QTimer)
@@ -486,7 +448,7 @@ class SingleInstance:
     @property
 
     def method(self) -> str:
-        """Aktiv låsmetod: mutex | flock | pidfile | none."""
+        """Aktiv låsmetod: mutex | flock | none."""
 
         return self._method
 
@@ -508,28 +470,22 @@ class SingleInstance:
             import ctypes
             kernel32 = ctypes.windll.kernel32
 
-            mutex_name = f"Global\\{self._lock_name}_mutex"
+            # Local håller lås och fokusbegäran inom samma inloggningssession.
+            # HANDLE måste vara pekarstor även på 64-bitars Windows.
+            kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+            kernel32.CreateMutexW.restype = ctypes.c_void_p
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel32.CloseHandle.restype = ctypes.c_int
+            kernel32.GetLastError.restype = ctypes.c_ulong
+            mutex_name = f"Local\\{self._lock_name}_mutex"
             handle = kernel32.CreateMutexW(None, False, mutex_name)
-
-            if not handle:
-                # Global\ kan kräva rättigheter — prova Local\
-                mutex_name = f"Local\\{self._lock_name}_mutex"
-                handle = kernel32.CreateMutexW(
-                    None, False, mutex_name
-                )
-                if not handle:
-                    _log.debug(
-                        "CreateMutexW misslyckades — faller "
-                        "tillbaka"
-                    )
-                    return None
-
             last_error = kernel32.GetLastError()
+            if not handle:
+                _log.error("CreateMutexW misslyckades: %s", last_error)
+                return None
             if last_error == ERROR_ALREADY_EXISTS:
                 kernel32.CloseHandle(handle)
-                _log.info(
-                    "Annan instans kör redan (Windows mutex)"
-                )
+                _log.info("Annan instans kör redan (Windows mutex)")
                 return False
 
             self._mutex_handle = handle
@@ -558,19 +514,32 @@ class SingleInstance:
 
             self._lock_dir.mkdir(parents=True, exist_ok=True)
             # Hålls öppen så länge processen lever
-            lock_file = open(
-                self._lock_path, "a+", encoding="utf-8"
-            )
+            # Följ inte symlänkar i den delade temporärkatalogen: låsfilen
+            # trunkeras senare för PID-information.
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(self._lock_path, flags, 0o600)
+            try:
+                import stat
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
+                    raise OSError("Osäker låsfil")
+                lock_file = os.fdopen(fd, "r+", encoding="utf-8")
+            except Exception:
+                os.close(fd)
+                raise
 
             try:
                 fcntl.flock(
                     lock_file.fileno(),
                     fcntl.LOCK_EX | fcntl.LOCK_NB,
                 )
-            except (BlockingIOError, OSError):
+            except OSError as exc:
                 lock_file.close()
-                _log.info("Annan instans kör redan (flock)")
-                return False
+                import errno
+                if exc.errno in (errno.EACCES, errno.EAGAIN):
+                    _log.info("Annan instans kör redan (flock)")
+                    return False
+                raise
 
             # Skriv vår PID i låsfilen (informativt)
             try:
@@ -597,54 +566,8 @@ class SingleInstance:
             _log.debug("flock ej tillgänglig: %s", exc)
             return None
 
-    def _acquire_pidfile(self) -> bool:
-        """
-        PID-fil-fallback med stale-detektering.
-        Används endast om mutex/flock saknas.
-        """
-
-        try:
-            if self._pid_path.exists():
-                try:
-                    content = self._pid_path.read_text(
-                        encoding="utf-8"
-                    ).strip()
-                    existing_pid = int(content.splitlines()[0])
-                except (ValueError, IndexError):
-                    existing_pid = -1
-
-                if existing_pid > 0 and _pid_is_running(
-                    existing_pid
-                ):
-                    _log.info(
-                        "Annan instans kör redan "
-                        "(PID-fil, pid=%d)",
-                        existing_pid,
-                    )
-                    return False
-
-                _log.warning(
-                    "Stale PID-fil hittad (pid=%s död) — "
-                    "tar över låset",
-                    existing_pid,
-                )
-
-            self._write_pid_info()
-            _log.info(
-                "Singelinstanslås taget: PID-fil (%s)",
-                self._pid_path,
-            )
-            return True
-
-        except Exception as exc:
-            _log.error(
-                "PID-fil-lås misslyckades: %s", exc, exc_info=True,
-            )
-            # Hellre tillåta start än att blockera felaktigt
-            return True
-
     def _write_pid_info(self) -> None:
-        """Skriv PID-fil (atomiskt). Informativ + fallback-lås."""
+        """Skriv PID-fil (atomiskt). Endast informativ; detta är inte ett lås."""
 
         try:
             _atomic_write_text(
@@ -696,17 +619,11 @@ class SingleInstance:
                 )
 
     def _signal_handler(self, signum: int, frame: Any) -> None:
-        """Släpp låset vid signal och kedja vidare."""
+        """Kedja signalen och låt processens cleanup släppa låset."""
 
-        _log.info(
-            "Signal %s mottagen — släpper singelinstanslås",
-            signum,
-        )
-        try:
-            self.release()
-        except Exception:
-            pass
-
+        _log.info("Signal %s mottagen — avslutar med låset kvar till processens cleanup", signum)
+        # Släpp inte låset förrän finally/atexit eller processavslut: signalen
+        # kan avbryta arbete som fortfarande behöver avslutas säkert.
         prev = self._prev_handlers.get(signum)
         if callable(prev):
             try:
