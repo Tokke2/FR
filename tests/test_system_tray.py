@@ -7,6 +7,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
+from core import runtime_policy
 from plugins.auto_update import plugin as update_plugin
 
 
@@ -113,7 +114,9 @@ class SystemTrayTests(unittest.TestCase):
         app_instance = SimpleNamespace(quit=Mock())
         app = SimpleNamespace(windowIcon=lambda: icon or IconStub(), instance=lambda: app_instance)
         env = {'QApplication': app, 'QMenu': MenuStub, 'QTimer': TimerStub, 'Path': Path,
-               '__file__': str(Path('plugins/main_gui/plugin.py').resolve()), '_log': Mock()}
+               '__file__': str(Path('plugins/main_gui/plugin.py').resolve()), '_log': Mock(),
+               # Bakgrundsläget räknar intervall med runtime_policy (energisparläge).
+               'runtime_policy': runtime_policy}
         methods = {'_setup_system_tray', '_show_from_tray', '_tray_activated', 'add_update_tray_action',
                    '_watched_message_clicked',
                    '_quit_application', '_can_hide_to_tray', '_check_tray_available', '_hide_if_still_minimized'}

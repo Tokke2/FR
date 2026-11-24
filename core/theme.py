@@ -959,18 +959,43 @@ def colorize(pixmap: Any, color: str) -> Any:
     return tinted
 
 
+# Ikoner ritas en gång per (namn, tema, storlek, skalfaktor) och återanvänds.
+# Utan cachen ritas samma SVG om varje gång menyn byggs eller temat byts, vilket
+# kostar både tid och minne. Cachen töms när den blir för stor.
+_ICON_CACHE: Final[dict[tuple[str, str, int, float], Any]] = {}
+ICON_CACHE_LIMIT: Final[int] = 96
+
+
+def clear_icon_cache() -> int:
+    """Töm ikoncachen. Returnerar antalet poster som släpptes."""
+    count = len(_ICON_CACHE)
+    _ICON_CACHE.clear()
+    return count
+
+
+def icon_cache_size() -> int:
+    """Antal cachade ikoner, för minnesöversikten och testerna."""
+    return len(_ICON_CACHE)
+
+
 def icon(root: Path, name: str, theme: str = "dark", size: int = 20,
          widget: Any = None) -> Any:
     """Ladda en temafärgad ikon i skärmens verkliga upplösning.
 
     Vektorbilden ritas med ``size × skalfaktor`` pixlar och får samma
     enhetspixelkvot som skärmen. Utan det ritar Qt om ikonen i efterhand och
-    resultatet blir suddigt på 125–200 % skalning. Returnerar ``None`` om Qt
-    eller filen saknas.
+    resultatet blir suddigt på 125–200 % skalning. Resultatet cachas per namn,
+    tema, storlek och skalfaktor så att samma ikon inte ritas om i onödan.
+    Returnerar ``None`` om Qt eller filen saknas.
     """
     path = icon_path(root, name)
     if path is None:
         return None
+    ratio = device_pixel_ratio(widget)
+    key = (f"{Path(root).resolve()}|{name}", theme, int(size), round(float(ratio), 2))
+    cached = _ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
     try:
         from PySide6.QtGui import QIcon, QPixmap
         from PySide6.QtCore import Qt as QtCore
@@ -980,7 +1005,6 @@ def icon(root: Path, name: str, theme: str = "dark", size: int = 20,
         renderer = QSvgRenderer(str(path))
         if not renderer.isValid():
             return None
-        ratio = device_pixel_ratio(widget)
         pixels = max(1, int(round(size * ratio)))
         pixmap = QPixmap(pixels, pixels)
         pixmap.fill(QtCore.GlobalColor.transparent)
@@ -993,7 +1017,13 @@ def icon(root: Path, name: str, theme: str = "dark", size: int = 20,
             painter.end()
         pixmap.setDevicePixelRatio(ratio)
         tinted = colorize(pixmap, palette(theme)["text_muted"])
-        return QIcon(tinted)
+        icon_value = QIcon(tinted)
+        if len(_ICON_CACHE) >= ICON_CACHE_LIMIT:
+            # Enkel men förutsägbar tömning: hellre några omritningar än en
+            # cache som växer under en hel arbetsdag.
+            _ICON_CACHE.clear()
+        _ICON_CACHE[key] = icon_value
+        return icon_value
     except Exception:
         return None
 

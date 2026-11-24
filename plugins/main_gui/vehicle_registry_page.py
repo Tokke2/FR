@@ -89,7 +89,7 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QSplitter, QTabBar, QTableWidget,
     QTableWidgetItem, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
-from core import layout_memory, skeleton, table_view
+from core import layout_memory, responsive_layout, skeleton, table_view
 from core import theme as design
 from core import vehicle_filters
 from plugins.gui_helpers.page_header import PageHeader
@@ -672,6 +672,11 @@ class YearTab(QWidget):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.horizontalHeader().sectionResized.connect(
             self._on_column_resized)
+        # Kolumnbredderna anpassas till innehållet när vyn ändrar storlek, så
+        # att inget klipps och ingen vågrät rullning behövs (för skärmar i alla
+        # storlekar). Användarens egen bredd vinner alltid över automaten.
+        self._auto_columns = True
+        self._table.installEventFilter(self)
         layout.addWidget(self._table, 1)
         self._table_ready = True
         return container
@@ -719,12 +724,22 @@ class YearTab(QWidget):
         return Path(__file__).resolve().parents[2]
 
     def _load_table_profile(self) -> None:
-        """Lägg på sparad kolumnordning och bredd för året."""
+        """Lägg på sparad kolumnordning och bredd för året.
+
+        Finns ingen sparad profil anpassas bredden automatiskt till fönstret.
+        """
         try:
-            table_view.load(self._profile_root(), self._table, "fordon",
-                            list(VEHICLE_COLUMNS), self.year)
+            profile = table_view.load(self._profile_root(), self._table, "fordon",
+                                      list(VEHICLE_COLUMNS), self.year)
         except Exception:
+            profile = {}
             _log.debug("Tabellprofilen kunde inte användas", exc_info=True)
+        if profile.get("widths"):
+            # Användaren har valt bredder – automaten ska inte röra dem.
+            self._auto_columns = False
+        else:
+            self._auto_columns = True
+            self._fit_columns_soon()
 
     def _save_table_profile(self) -> None:
         """Spara kolumnläget när användaren har ändrat det."""
@@ -735,8 +750,63 @@ class YearTab(QWidget):
         except Exception:
             _log.debug("Tabellprofilen kunde inte sparas", exc_info=True)
 
+    def eventFilter(self, watched: Any, event: Any) -> bool:
+        """Anpassa kolumnerna när tabellen byter storlek."""
+        try:
+            if watched is self._table and event.type() == event.Type.Resize:
+                self._fit_columns_soon()
+        except Exception:
+            pass
+        return super().eventFilter(watched, event)
+
+    def _fit_columns_soon(self) -> None:
+        """Vänta tills storleksändringen är klar innan kolumnerna räknas om."""
+        timer = getattr(self, "_fit_timer", None)
+        if timer is None:
+            self._fit_timer = QTimer(self)
+            self._fit_timer.setSingleShot(True)
+            self._fit_timer.setInterval(120)
+            self._fit_timer.timeout.connect(self._fit_columns)
+            timer = self._fit_timer
+        timer.start()
+
+    def _fit_columns(self) -> None:
+        """Fördela kolumnbredden så att rubriken och värdena syns."""
+        if not getattr(self, "_auto_columns", True):
+            return
+        try:
+            room = self._table.viewport().width()
+            if room < 120:
+                return
+            longest: List[Any] = [None] * len(VEHICLE_COLUMNS)
+            for row in range(self._table.rowCount()):
+                for column in range(len(VEHICLE_COLUMNS)):
+                    cell = self._table.item(row, column)
+                    if cell is None:
+                        continue
+                    text = cell.text()
+                    if longest[column] is None or len(text) > len(longest[column]):
+                        longest[column] = text
+            widths = responsive_layout.column_widths(list(VEHICLE_COLUMNS), longest, room)
+            # Automatiken får inte sparas som användarens eget val.
+            self._fitting = True
+            try:
+                for column, width in enumerate(widths[:len(VEHICLE_COLUMNS)]):
+                    self._table.setColumnWidth(column, width)
+            finally:
+                self._fitting = False
+        except Exception:
+            _log.debug("Kolumnbredderna kunde inte anpassas", exc_info=True)
+
     def _on_column_resized(self, *_args) -> None:
-        """Spara bredden en kort stund efter att användaren släppt kanten."""
+        """Spara bredden en kort stund efter att användaren släppt kanten.
+
+        Så snart användaren själv ändrar en bredd stängs automaten av för den
+        fliken – annars skulle nästa storleksändring skriva över valet.
+        """
+        if getattr(self, "_auto_columns", False) and getattr(self, "_fitting", False):
+            return
+        self._auto_columns = False
         timer = getattr(self, "_profile_timer", None)
         if timer is None:
             self._profile_timer = QTimer(self)

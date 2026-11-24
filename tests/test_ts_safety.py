@@ -132,10 +132,15 @@ class TSOutputBlockTests(unittest.TestCase):
         import sys as _sys
         _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         from core import theme as _design
-        env = {'get_schema_info_safe': lambda app: SimpleNamespace(is_active=True, version='test', post_types=['45'], post_count=1), 'QTimer': timer, 'STATS_UPDATE_INTERVAL_MS': 30000, 'design': _design}
+        env = {'get_schema_info_safe': lambda app: SimpleNamespace(is_active=True, version='test', post_types=['45'], post_count=1), 'QTimer': timer, 'STATS_UPDATE_INTERVAL_MS': 30000, 'design': _design,
+               # Energisparläget räknar nästa intervall via runtime_policy.
+               'runtime_policy': __import__('core.runtime_policy', fromlist=['runtime_policy'])}
         exec(compile(mod, '<status>', 'exec'), env)
         from unittest.mock import Mock
-        ui = env['Isolated'](); ui.app = None; ui.schema_status = SimpleNamespace(setText=Mock(), setStyleSheet=Mock())
+        ui = env['Isolated'](); ui.app = None
+        ui.schema_status = SimpleNamespace(setText=Mock(), setStyleSheet=Mock())
+        # Nästa intervall räknas av energisparläget; här räcker standardvärdet.
+        ui._next_interval = lambda base: base
         ui._update_schema_status()
         self.assertIn('spärrad', ui.schema_status.setText.call_args.args[0])
 

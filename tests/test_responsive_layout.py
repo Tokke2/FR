@@ -207,3 +207,48 @@ class DealerResizeLogicTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ColumnWidthTests(unittest.TestCase):
+    """Kolumnbredder som anpassar sig efter innehåll och skärm."""
+
+    def test_visible_header_and_longest_value_are_used(self):
+        from core.responsive_layout import column_widths
+        widths = column_widths(["VIN-kod", "Modell", "Färg"])
+        self.assertEqual(len(widths), 3)
+        self.assertTrue(all(width >= 60 for width in widths))
+
+    def test_wide_values_get_more_room_than_narrow_ones(self):
+        from core.responsive_layout import column_widths
+        widths = column_widths(["År", "Återförsäljare"], [None, "Långt företagsnamn AB"])
+        self.assertGreater(widths[1], widths[0])
+
+    def test_narrow_window_shrinks_columns_but_never_below_minimum(self):
+        from core.responsive_layout import column_widths
+        widths = column_widths(["VIN-kod", "Modell", "Färg", "Återförsäljare"],
+                               available=300)
+        self.assertLessEqual(sum(widths), 300 + 4)
+        self.assertTrue(all(width >= 60 for width in widths))
+
+    def test_impossible_width_keeps_the_minimum(self):
+        from core.responsive_layout import column_widths
+        widths = column_widths(["VIN-kod", "Modell"], available=20)
+        self.assertEqual(widths, [60, 60])
+
+    def test_no_available_width_leaves_the_hints_untouched(self):
+        from core.responsive_layout import column_widths
+        widths = column_widths(["VIN-kod", "Färg"], available=0)
+        self.assertGreater(sum(widths), 0)
+
+    def test_scroll_check(self):
+        from core.responsive_layout import fits_without_scroll
+        self.assertTrue(fits_without_scroll([100, 100], 200))
+        self.assertTrue(fits_without_scroll([100, 100], 201))
+        self.assertFalse(fits_without_scroll([100, 100], 150))
+        self.assertTrue(fits_without_scroll([], 0))
+
+    def test_compact_threshold(self):
+        from core.responsive_layout import needs_compact
+        self.assertTrue(needs_compact(1099))
+        self.assertFalse(needs_compact(1100))
+        self.assertFalse(needs_compact("trasigt"))

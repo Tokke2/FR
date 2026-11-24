@@ -355,6 +355,30 @@ innehåller PIN-kod eller lösenord maskas innan bilden visas, och inget sparas 
 du väljer **Spara bild…**. Bilder hamnar i `logs/support/`. Med **Kopiera till
 urklipp** kan bilden klistras in i ett meddelande i stället.
 
+**Snabbhet, minne och energiförbrukning.** Programmet gör bara arbete när det
+behövs:
+
+* **Start.** Bara fordonsdatasidan byggs före den första ritningen. Övriga sidor
+  skapas i en enda omgång när fönstret visas, vilket ger kortare starttid och
+  mindre minne för sidor som aldrig öppnas. Statistik och schemastatus räknas
+  först efter att fönstret ritats.
+* **Sparläge i bakgrunden.** När fönstret är dolt eller minimerat går
+  uppdateringarna ner till en fjärdedel av takten (statistik och schemastatus
+  från 30 sekunder till två minuter, systemfältet från 10 till 40 sekunder,
+  bevakad mapp likaså). Står fönstret öppet men orört i två minuter sänks takten
+  också, tills du rör musen eller tangentbordet igen. En kontroll sker alltid
+  minst var tionde minut, så att nya filer inte missas.
+* **Ikoncache.** Ikonerna ritas en gång per namn, tema, storlek och skalfaktor och
+  återanvänds sedan. Cachen har ett tak och töms vid behov.
+* **Kolumnbredder.** Tabellen fördelar bredden efter rubrikerna och de längsta
+  värdena, så att texten syns utan vågrät rullning. Så snart du själv drar i en
+  kolumnkant stängs automaten av för den fliken och ditt val sparas i stället.
+* **Minne och prestanda.** **Verktyg → Minne och prestanda** visar processens
+  arbetsminne, antal Python-objekt och en bedömning (normalt, förhöjt eller
+  högt). Knappen **Frigör minne** släpper cachade ikoner, tömmer tabellvyerna och
+  kör skräpsamlaren, och rapporterar exakt hur mycket som frigjordes – blir
+  resultatet noll visas det också, i stället för en påhittad siffra.
+
 **Svenska och versaler.** Menyer, knappar och rubriker är på svenska och börjar med
 versal. Ett automatiskt test granskar källkoden och fallerar om ett engelskt
 gränssnittsord smyger sig in.

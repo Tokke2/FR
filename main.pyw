@@ -543,7 +543,15 @@ class Application:
         exit_code = 0
         try:
             self._print_banner()
+            # Tid per startsteg: en långsam start ska synas i loggen i stället
+            # för att bara kännas seg (prestandaomgången).
+            self._start_steps: list[tuple[str, float]] = []
+            import time as _time
+
+            _step = _time.perf_counter()
             await self._load_configuration()
+            self._start_steps.append(("Konfiguration", (_time.perf_counter() - _step) * 1000))
+            _step = _time.perf_counter()
             self._setup_cache_manager()
             log_level = (
                 os.environ.get("APP_LOG_LEVEL")
@@ -556,6 +564,8 @@ class Application:
             self._ensure_directories()
             await self._create_event_bus()
             self._init_qt()
+            self._start_steps.append(("Qt och loggning", (_time.perf_counter() - _step) * 1000))
+            _step = _time.perf_counter()
             self._print_section("Laddar plugins")
             load_result = await self._load_plugins()
             self._print_load_result(load_result, "Laddade")
@@ -565,6 +575,8 @@ class Application:
             self._print_section("Aktiverar plugins")
             activate_result = await self._activate_plugins()
             self._print_load_result(activate_result, "Aktiverade")
+            self._start_steps.append(("Plugins", (_time.perf_counter() - _step) * 1000))
+            self._log_start_timing()
             if not self._find_main_window():
                 _log.error("Inget huvudfönster skapades")
                 self._print_error_and_plugins()
@@ -594,6 +606,26 @@ class Application:
             if self._state != AppState.TERMINATED:
                 await self.shutdown()
         return exit_code
+    def _log_start_timing(self) -> None:
+        """Skriv starttiderna och varna om något steg tog för lång tid.
+
+        Trösklarna ligger i ``core.runtime_policy``, så att samma mått används i
+        test och i logg. Inga tider hittas på – allt mäts med ``perf_counter``.
+        """
+        try:
+            from core import runtime_policy
+
+            total = sum(duration for _name, duration in self._start_steps)
+            if runtime_policy.start_is_slow(self._start_steps, total):
+                _log.warning("Långsam start: %.0f ms", total)
+                for name, duration in self._start_steps:
+                    _log.warning("  %s: %.0f ms", name, duration)
+            else:
+                _log.info("Starttid: %.0f ms (%s)", total,
+                          ", ".join(f"{name} {duration:.0f}" for name, duration in self._start_steps))
+        except Exception:
+            _log.debug("Starttiderna kunde inte sammanställas")
+
     async def shutdown(self) -> None:
         """Stäng ner applikationen gracefully."""
         if self._state in (AppState.SHUTTING_DOWN, AppState.TERMINATED):

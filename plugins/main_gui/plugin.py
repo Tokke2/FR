@@ -72,6 +72,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from core import layout_memory
+from core import memory_guard
+from core import runtime_policy
 from core import theme as design
 from core.plugin_base import PluginBase
 if TYPE_CHECKING:
@@ -707,7 +709,7 @@ class MainWindow(QMainWindow):
             tray.show()
             self._tray_watch_timer = QTimer(self)
             self._tray_watch_timer.timeout.connect(self._check_tray_available)
-            self._tray_watch_timer.start(5000)
+            self._tray_watch_timer.start(runtime_policy.BASE_TRAY_INTERVAL_MS)
         except Exception:
             _log.exception("Kunde inte skapa systemfältsikon")
             if self._tray_icon is not None:
@@ -729,9 +731,23 @@ class MainWindow(QMainWindow):
             _log.warning("Systemfältet försvann; visar Fordonsreg minimerat igen")
             self.showMinimized()
 
+    def event(self, event) -> bool:
+        """Fånga mushändelser så att inaktivt läge nollställs."""
+        from PySide6.QtCore import QEvent
+
+        if event.type() in (QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress,
+                            QEvent.Type.KeyPress, QEvent.Type.Wheel):
+            self._note_activity()
+        return super().event(event)
+
     def changeEvent(self, event) -> None:
         from PySide6.QtCore import QEvent
         super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            # Synligt eller dolt: anpassa hur ofta bakgrunden får arbeta.
+            policy = getattr(self, "_apply_timer_policy", None)
+            if policy is not None:
+                QTimer.singleShot(0, policy)
         if event.type() == QEvent.Type.WindowStateChange and self.isMinimized() and not getattr(self, "_quit_requested", False):
             self._restore_maximized = bool(event.oldState() & Qt.WindowState.WindowMaximized)
             QTimer.singleShot(0, self._hide_if_still_minimized)
@@ -813,6 +829,11 @@ class MainWindow(QMainWindow):
         """
         width, height = design.PREFERRED_WIDTH, design.PREFERRED_HEIGHT
         self._restore_position = None
+        # Tidpunkter för senaste aktivitet och senaste bakgrundskörning.
+        import time as _time
+
+        self._last_activity = _time.monotonic()
+        self._last_run: dict[str, float] = {}
         screen = QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
@@ -901,16 +922,48 @@ class MainWindow(QMainWindow):
         return design.clamp_font_size(value)
 
     def _init_pages(self) -> None:
-        """Initiera sidor från plugins."""
+        """Initiera sidor från plugins.
+
+        Bara fordonsdata byggs före första ritningen – det är sidan som visas.
+        Övriga sidor skapas i :meth:`_init_remaining_pages` när fönstret är
+        färdigt, vilket gör starten märkbart snabbare och minskar minnet för
+        den som aldrig öppnar dem.
+        """
         self.pages: List[Tuple[str, QWidget]] = []
         self.page_widgets: Dict[str, QWidget] = {}
-        # 1. Fordonsdata (prioritet 1)
+        self._deferred_pages_ready = False
+        # 1. Fordonsdata (prioritet 1) – behövs direkt.
         self._init_vehicle_data_page()
-        # 2. TS Schema (ny i v5.0)
-        self._init_ts_schema_page()
-        # 3. Övriga sidor
-        self._init_other_pages()
-        _log.info("Initialized %d pages", len(self.pages))
+        _log.info("Initialized %d pages (resten skapas efter första ritningen)",
+                  len(self.pages))
+
+    def _init_remaining_pages(self) -> None:
+        """Skapa resten av sidorna när fönstret redan syns."""
+        if getattr(self, "_deferred_pages_ready", True):
+            return
+        self._deferred_pages_ready = True
+        try:
+            self._init_ts_schema_page()
+            self._init_other_pages()
+            self._attach_pages_to_stack()
+            _log.info("Initialized %d pages totalt", len(self.pages))
+        except Exception:
+            _log.exception("Resten av sidorna kunde inte skapas")
+
+    def _attach_pages_to_stack(self) -> None:
+        """Lägg till sidor som skapades efter att navigeringen byggdes."""
+        stack = getattr(self, "stack", None)
+        group = getattr(self, "nav_group", None)
+        if stack is None or group is None:
+            return
+        for index, (page_name, widget) in enumerate(self.pages):
+            if stack.indexOf(widget) >= 0:
+                continue
+            stack.addWidget(widget)
+            # Knappen skapades redan i _init_navigation; koppla bara widgeten.
+            button = group.button(index)
+            if button is not None:
+                button.setEnabled(True)
 
     def _init_vehicle_data_page(self) -> None:
         """Initiera fordonsdata-sidan."""
@@ -1122,9 +1175,12 @@ class MainWindow(QMainWindow):
             if self.nav_group.button(0):
                 self.nav_group.button(0).setChecked(True)
                 self.stack.setCurrentIndex(0)
-        # Starta timers
-        QTimer.singleShot(1000, self._update_statistics)
-        QTimer.singleShot(1000, self._update_schema_status)
+        # Sidor som skapas efter första ritningen kopplas in här.
+        self._attach_pages_to_stack()
+        # Starta timers. De första uppdateringarna sker efter att fönstret
+        # ritats, så att starten inte fördröjs av statistikberäkningar.
+        QTimer.singleShot(1200, self._update_statistics)
+        QTimer.singleShot(1600, self._update_schema_status)
 
     def _create_sidebar(self) -> QWidget:
         """Skapa navigation som kan rullas om skärmen är för låg."""
@@ -1362,6 +1418,89 @@ class MainWindow(QMainWindow):
         except Exception:
             return self._density != "compact"
 
+    def _show_memory_status(self) -> None:
+        """Visa minnesläget och låt användaren frigöra minne."""
+        from plugins.main_gui.dialogs.memory_dialog import MemoryDialog
+        views = []
+        table = getattr(getattr(self, "vehicle_data_page", None), "_table", None)
+        if table is not None:
+            views.append(table)
+        MemoryDialog(self, self._root(), views).exec()
+
+    # ── Bakgrundsläge: spara batteri och minne ─────────────────────────
+    def _is_silent(self) -> bool:
+        """Sant när fönstret är dolt eller minimerat och inget behöver ritas."""
+        try:
+            return self.isMinimized() or not self.isVisible()
+        except Exception:
+            return False
+
+    def _is_idle(self) -> bool:
+        """Sant när fönstret stått orört en längre stund."""
+        try:
+            from PySide6.QtGui import QCursor
+            import time
+
+            last = getattr(self, "_last_activity", time.monotonic())
+            return (time.monotonic() - last) >= runtime_policy.idle_after_seconds(self._is_silent())
+        except Exception:
+            return False
+
+    def _timer_interval(self, base_ms: int) -> int:
+        """Aktuellt intervall för en återkommande uppgift."""
+        return runtime_policy.effective_interval(base_ms, self._is_silent(), self._is_idle())
+
+    def _next_interval(self, base_ms: int) -> int:
+        """Intervall för nästa körning, med ett säkert standardvärde."""
+        try:
+            return self._timer_interval(base_ms)
+        except Exception:
+            return base_ms
+
+    def _background_allowed(self, name: str, base_ms: int) -> bool:
+        """Får en bakgrundsuppgift köra nu, med hänsyn till dolt läge?"""
+        import time
+
+        if not self._is_silent() and not self._is_idle():
+            self._last_run[name] = time.monotonic()
+            return True
+        last = getattr(self, "_last_run", {}).get(name)
+        now = time.monotonic()
+        interval = runtime_policy.effective_interval(base_ms, True, self._is_idle()) / 1000
+        if last is None or (now - last) >= interval:
+            self._last_run[name] = now
+            return True
+        return False
+
+    def _apply_timer_policy(self) -> None:
+        """Ställ om alla återkommande timers efter synligt, dolt eller inaktivt läge."""
+        try:
+            if getattr(self, "_last_run", None) is None:
+                self._last_run = {}
+            silent = self._is_silent()
+            pairs = (
+                ("_watched_timer", runtime_policy.BASE_WATCH_INTERVAL_MS),
+                ("_tray_watch_timer", runtime_policy.BASE_TRAY_INTERVAL_MS),
+                ("_instance_focus_timer", runtime_policy.BASE_INSTANCE_INTERVAL_MS),
+                ("_year_timer", 60 * 60 * 1000),
+            )
+            for attribute, base in pairs:
+                timer = getattr(self, attribute, None)
+                if timer is None or not hasattr(timer, "setInterval"):
+                    continue
+                interval = runtime_policy.effective_interval(base, silent, self._is_idle())
+                if timer.interval() != interval:
+                    timer.setInterval(interval)
+            _log.debug("Timerläge: %s", "dolt" if silent else "synligt")
+        except Exception:
+            _log.debug("Timerläget kunde inte ställas om", exc_info=True)
+
+    def _note_activity(self) -> None:
+        """Anteckna att användaren gjorde något, så inaktivt läge nollställs."""
+        import time
+
+        self._last_activity = time.monotonic()
+
     def _show_scaling_audit(self) -> None:
         """Mät fönstret och rapportera text som klipps (förslag 4)."""
         from core import layout_audit
@@ -1536,6 +1675,8 @@ class MainWindow(QMainWindow):
         tools_menu.addAction("🔄 Uppdatera cache", self._refresh_cache)
         tools_menu.addAction("🔧 Bygg om index", self._rebuild_index)
         tools_menu.addSeparator()
+        tools_menu.addAction("⚡ Minne och prestanda...", self._show_memory_status)
+        tools_menu.addSeparator()
         tools_menu.addAction("📋 Visa felsökningslogg...", self._show_error_log)
         tools_menu.addAction("🧭 Felkodsguide...", self._show_error_guide)
         tools_menu.addSeparator()
@@ -1693,6 +1834,11 @@ class MainWindow(QMainWindow):
         self._check_watched_folder(force=True)
 
     def _check_watched_folder(self, force: bool = False) -> None:
+        # I dolt läge läses mappen bara med det längre intervallet, så att en
+        # nätverksmapp inte frågas var 30:e sekund i onödan.
+        if not force and not self._background_allowed(
+                "watched", runtime_policy.BASE_WATCH_INTERVAL_MS):
+            return
         try:
             from core.watched_folder import load_settings, mark_reported, save_settings, scan
             settings = load_settings(self._watched_settings_path())
@@ -1862,8 +2008,18 @@ class MainWindow(QMainWindow):
             button.setToolTip(label)
             design.set_accessible(button, design.label_for_icon_button(label), f"Öppna {label}")
 
+    def hideEvent(self, event) -> None:
+        """När fönstret döljs går programmet ner i sparläge direkt."""
+        super().hideEvent(event)
+        QTimer.singleShot(0, self._apply_timer_policy)
+
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        # Resten av sidorna skapas först när fönstret visas, i en enda omgång
+        # efter den första ritningen – starten blir kortare och minnet mindre
+        # för de sidor som aldrig öppnas.
+        if not getattr(self, "_deferred_pages_ready", True):
+            QTimer.singleShot(0, self._init_remaining_pages)
         # Startar alltid minimerat: syns fönstret ändå under startfasen
         # minimeras det direkt, så att ingen ruta hinner bli störande.
         if self._startup_phase:
@@ -1989,8 +2145,9 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.schema_status.setText(f"Fel: {str(e)[:20]}")
             self.schema_status.setStyleSheet(f"color: {design.palette(getattr(self, '_theme', 'dark'))['danger']};")
-        # Uppdatera igen om 30 sekunder
-        QTimer.singleShot(STATS_UPDATE_INTERVAL_MS, self._update_schema_status)
+        # Ny uppdatering – men i dolt läge bara en bråkdel så ofta, så att
+        # programmet inte arbetar i bakgrunden (energi och minne).
+        QTimer.singleShot(self._next_interval(STATS_UPDATE_INTERVAL_MS), self._update_schema_status)
 
     def _update_statistics(self) -> None:
         """Uppdatera statistik i sidebar."""
@@ -2003,8 +2160,7 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             self.stats_info.setText(f"Fel: {str(e)[:20]}")
-        # Uppdatera igen om 30 sekunder
-        QTimer.singleShot(STATS_UPDATE_INTERVAL_MS, self._update_statistics)
+        QTimer.singleShot(self._next_interval(STATS_UPDATE_INTERVAL_MS), self._update_statistics)
 
     def _get_vehicle_statistics(self) -> VehicleStatistics:
         """Hämta fordonsstatistik."""

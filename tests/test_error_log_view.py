@@ -141,6 +141,7 @@ class ErrorLogViewTests(unittest.TestCase):
         page._show_learning_info = page._toggle_learning = page._clear_learning = Mock()
         page._show_global_search = page._show_dashboard = page._show_watched_folder = Mock()
         page._show_ts_verification = page._show_error_guide = Mock()
+        page._show_memory_status = Mock()
         menu = SimpleNamespace(addAction=Mock(), addSeparator=Mock())
         menubar = SimpleNamespace(addMenu=Mock(return_value=menu))
         page._create_tools_menu(menubar)
