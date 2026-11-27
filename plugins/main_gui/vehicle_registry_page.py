@@ -669,6 +669,11 @@ class YearTab(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
         self._table.verticalHeader().setVisible(False)
+        # Sorteringen slås på först när tabellen är fylld, annars sorteras
+        # raderna om mitt under påfyllningen. Kolumnerna kan flyttas.
+        self._table.setSortingEnabled(False)
+        header.setSectionsMovable(True)
+        header.sectionMoved.connect(self._on_column_moved)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.horizontalHeader().sectionResized.connect(
             self._on_column_resized)
@@ -816,6 +821,20 @@ class YearTab(QWidget):
             timer = self._profile_timer
         timer.start()
 
+    def _on_column_moved(self, *_args) -> None:
+        """Spara kolumnordningen när användaren flyttar en kolumn."""
+        if getattr(self, "_loading", False):
+            return
+        # En flytt är användarens val: automaten får inte röra bredderna.
+        self._auto_columns = False
+        timer = getattr(self, "_profile_timer", None)
+        if timer is None:
+            # Skapa timern på samma sätt som vid breddändring och starta den.
+            self._on_column_resized()
+            timer = getattr(self, "_profile_timer", None)
+        if timer is not None:
+            timer.start()
+
     def _selected_row(self) -> int:
         """Index i årsfilen för markerad rad, eller -1."""
         rows = self._table.selectionModel().selectedRows() if self._table.selectionModel() else []
@@ -897,6 +916,7 @@ class YearTab(QWidget):
             self._empty_label.show()
         self._loading = False
         self._load_table_profile()
+        self._table.setSortingEnabled(True)
         self._update_summary()
         if visible:
             self._on_table_selection_changed()

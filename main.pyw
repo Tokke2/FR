@@ -27,7 +27,24 @@ Environment Variables:
     APP_DEBUG=1                        # Aktivera debug
     APP_CONFIG=path/to/config.json     # Alternativ config-fil
     APP_LOG_LEVEL=DEBUG                # Log level
-FÖRÄNDRINGAR v1.0.2 (Session 11 — förbättringsregel, spec v1.6):
+FÖRÄNDRINGAR v1.0.3 (Skarp logotyp, daglig kontroll, omstart):
+
+    - Logotypen är omritad som exakt vektorgeometri (FR-monogram med
+      väg) med namngivna lager, tryck-PDF och skarpa rasterstorlekar.
+
+    - Uppdateraren kontrollerar en gång per dygn kl. 00:00, startar om
+      appen efter lyckad uppdatering och tar bort säkerhetskopian först
+      när appen har startat och fungerat.
+
+    - Arkiverade loggar raderas efter sju dagar. Felsökningsloggen har
+      fliken Aktiva fel där åtgärdade fel kan tas bort.
+
+    - Inställningar → Profiler för import: skapa, byt namn och ta bort.
+
+    - Fönstret öppnas i hela skärmens höjd; tabeller har sorterbara
+      rubriker och flyttbara kolumner.
+
+FÖRÄNDRINGAR v1.0.2 — förbättringsregel, spec v1.6):
 
     - FIX: APP_LOG_LEVEL-miljövariabeln (dokumenterad men oanvänd)
       prioriteras nu före config-värdet logging.level.
@@ -52,7 +69,7 @@ FÖRÄNDRINGAR v1.0.1 (Session 10 — spec v1.4):
       TypeError-fallback (samma mönster som plugin_base).
     - Hela filen omskriven REN: markdown-artefakter borttagna
       ([url]-länkar, **-markeringar, *x*-mönster, &gt;/&lt;/&amp; osv.).
-Version: 1.0.2
+Version: 1.0.3
 Python: 3.12+
 Author: Rickard Längkvist
 """
@@ -84,7 +101,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum, auto
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 AUTHOR = "Rickard Längkvist"
 APP_NAME = "Fordonsreg"
 _log = logging.getLogger(__name__)

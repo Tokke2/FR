@@ -91,11 +91,54 @@ def _archive_locked(log_dir: Path, today: date) -> None:
         source.unlink()
 
 
+ARCHIVE_KEEP_DAYS = 7
+_ARCHIVED_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:-\d+)?\.log$")
+
+
+def purge_archived_days(log_dir: Path, today: date | None = None,
+                        keep_days: int = ARCHIVE_KEEP_DAYS) -> list[str]:
+    """Radera arkiverade loggar som är äldre än ``keep_days`` dagar.
+
+    Arkiverade filer heter ``ÅÅÅÅ-MM-DD.log`` (eller ``-2.log`` vid namnkonflikt).
+    Datumet i namnet är när loggen skrevs – inte när den flyttades. Filer vars
+    namn inte går att tolka lämnas orörda, liksom symboliska länkar.
+    Returnerar namnen som raderades.
+    """
+    log_dir = Path(log_dir)
+    archive = log_dir / ARCHIVE_DIR
+    if not archive.is_dir() or archive.is_symlink():
+        return []
+    try:
+        limit = max(1, int(keep_days))
+    except (TypeError, ValueError):
+        limit = ARCHIVE_KEEP_DAYS
+    cutoff = (today or date.today()).toordinal() - limit
+    removed = []
+    for entry in archive.iterdir():
+        match = _ARCHIVED_NAME.fullmatch(entry.name)
+        if not match or entry.is_symlink() or not entry.is_file():
+            continue
+        try:
+            day = date.fromisoformat(match.group(1))
+        except ValueError:
+            continue
+        if day.toordinal() > cutoff:
+            continue
+        try:
+            entry.unlink()
+            removed.append(entry.name)
+        except OSError:
+            continue
+    return removed
+
+
 def archive_old_days(log_dir: Path, today: date | None = None) -> None:
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
     with _process_lock(log_dir / '.dagliga.lock'):
         _archive_locked(log_dir, today or date.today())
+        # Arkiverade loggar sparas i sju dagar och raderas sedan automatiskt.
+        purge_archived_days(log_dir, today)
 
 
 def append_daily(log_dir: Path, day: date, text: str, *, today: date | None = None) -> None:
@@ -278,3 +321,126 @@ class DailyLogHandler(logging.Handler):
                     setattr(record, _CODE_MARKER, codes_written)
             except Exception as exc:
                 self._report(exc)
+
+
+# ── Aktiva fel och åtgärdade fel ───────────────────────────────────────────
+
+def load_error_codes(log_dir: Path) -> list[dict]:
+    """Läs felkodsregistret som en lista, nyast först.
+
+    Varje post får nyckeln ``key`` så att den kan åtgärdas eller tas bort.
+    Trasigt register ger en tom lista – hellre tomt än felaktigt.
+    """
+    path = Path(log_dir) / CODES_FILE
+    try:
+        data = _read_codes(path)
+    except (OSError, ValueError):
+        return []
+    entries = []
+    for key, entry in (data.get("entries") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        row = dict(entry)
+        row["key"] = key
+        row.setdefault("status", "aktiv")
+        entries.append(row)
+    entries.sort(key=lambda row: float(row.get("last_seen_epoch") or 0), reverse=True)
+    return entries
+
+
+def active_error_codes(log_dir: Path) -> list[dict]:
+    """Endast de fel som fortfarande gäller."""
+    return [row for row in load_error_codes(log_dir) if row.get("status") == "aktiv"]
+
+
+def mark_resolved(log_dir: Path, keys, note: str = "") -> int:
+    """Markera fel som åtgärdade, med tidpunkt och en frivillig notering.
+
+    Används när användaren själv har rättat felet och väljer **Markera
+    åtgärdade** i felsökningsloggen. Returnerar antalet poster som ändrades.
+    """
+    wanted = {str(key) for key in keys}
+    if not wanted:
+        return 0
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    with _process_lock(log_dir / ".felkoder.lock"):
+        path = log_dir / CODES_FILE
+        data = _read_codes(path)
+        changed = 0
+        when = datetime.now().astimezone().isoformat(timespec="seconds")
+        for key in wanted:
+            entry = data["entries"].get(key)
+            if not isinstance(entry, dict) or entry.get("status") != "aktiv":
+                continue
+            entry["status"] = "åtgärdad"
+            entry["resolved_at"] = when
+            if note:
+                entry["resolved_note"] = str(note)[:500]
+            changed += 1
+        if changed:
+            _write_codes(path, data)
+        return changed
+
+
+def remove_error_codes(log_dir: Path, keys) -> int:
+    """Ta bort poster ur registret när felet är åtgärdat och kontrollerat.
+
+    Endast åtgärdade poster får tas bort – ett aktivt fel ska aldrig kunna
+    försvinna av misstag. Returnerar antalet borttagna poster.
+    """
+    wanted = {str(key) for key in keys}
+    if not wanted:
+        return 0
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    with _process_lock(log_dir / ".felkoder.lock"):
+        path = log_dir / CODES_FILE
+        data = _read_codes(path)
+        removed = 0
+        for key in wanted:
+            entry = data["entries"].get(key)
+            if not isinstance(entry, dict) or entry.get("status") == "aktiv":
+                continue
+            del data["entries"][key]
+            removed += 1
+        if removed:
+            _write_codes(path, data)
+        return removed
+
+
+def prune_resolved(log_dir: Path, keep_days: int = ARCHIVE_KEEP_DAYS,
+                   today: date | None = None) -> int:
+    """Ta bort åtgärdade fel som är äldre än ``keep_days``.
+
+    Samma sju dagar som för arkiverade loggar, så att registret inte växer
+    obegränsat. Aktiva fel rörs aldrig.
+    """
+    log_dir = Path(log_dir)
+    path = log_dir / CODES_FILE
+    if not path.exists():
+        return 0
+    try:
+        limit = max(1, int(keep_days))
+    except (TypeError, ValueError):
+        limit = ARCHIVE_KEEP_DAYS
+    cutoff = (today or date.today()).toordinal() - limit
+    removed = 0
+    with _process_lock(log_dir / ".felkoder.lock"):
+        data = _read_codes(path)
+        for key, entry in list(data["entries"].items()):
+            if not isinstance(entry, dict) or entry.get("status") == "aktiv":
+                continue
+            stamp = entry.get("resolved_at")
+            if not isinstance(stamp, str):
+                continue
+            try:
+                day = date.fromisoformat(stamp[:10])
+            except ValueError:
+                continue
+            if day.toordinal() <= cutoff:
+                del data["entries"][key]
+                removed += 1
+        if removed:
+            _write_codes(path, data)
+    return removed

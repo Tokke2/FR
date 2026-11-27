@@ -396,6 +396,44 @@ mus. Ikonknappar har alltid ett namn som skärmläsaren läser upp.
 En bild av båda temana finns i `docs/tema.png`. Den ritas om med
 `python tools/theme_preview.py docs/tema.png` när paletten ändras.
 
+## Uppdatering: daglig kontroll, omstart och säkerhetskopia
+
+Appen jämför **filer**, inte versionsnummer. Vid start och därefter **en gång per
+dygn klockan 00:00** hämtas den senaste publicerade releasen från GitHub, och
+varje programfil jämförs med SHA-256 mot den lokala kopian. Skiljer inget görs
+ingenting. Skiljer något säkerhetskopieras de gamla filerna och en osynlig
+hjälpprocess installerar de nya när appen avslutas.
+
+- **Säkerhetskopian tas bort** när appen har startat och fungerat efter
+  uppdateringen. Misslyckas starten återställs kopian i stället.
+- **Appen startar om automatiskt** efter en lyckad uppdatering, utan
+  terminalfönster.
+- Båda beteendena kan stängas av i menyn **Start och uppdatering**:
+  ”Kontrollera uppdateringar varje dag klockan 00:00” och ”Starta om
+  automatiskt efter uppdatering”. De är på som standard.
+
+Varje kodändring publiceras som en ny release på GitHub, alltid markerad som
+**Latest**, byggd från samma commit som koden ligger på.
+
+## Fönstret på olika skärmar
+
+Fönstret öppnas i **hela skärmens höjd** och placeras i arbetsytans överkant, så
+att så många rader som möjligt syns utan rullning. Bredden anpassas: den
+föredragna bredden används när skärmen räcker till, annars 90 % av skärmen, och
+aldrig smalare än minimimåttet. Inställningen sparas per användare.
+
+Tabeller i programmet har **sorterbara rubriker** och **flyttbara kolumner**.
+Sorteringen slås på först när tabellen är fylld, så att raderna inte sorteras om
+under en pågående import. Kolumnordning och bredd sparas i tabellprofilen.
+
+## Profiler för import
+
+Inställningar → **Profiler för import** samlar alla namngivna
+kolumnmappningar på ett ställe. En profil skapas i importguiden (mappa
+kolumnerna och välj Spara profil) och kan sedan bytas namn på eller tas bort
+här. Profilerna är användardata i `json/mappings/` och följer aldrig med en
+programuppdatering. Fliken finns i program som använder profilagret.
+
 ## Namn, ikon och genväg
 
 Programmets namn är **Fordonsreg**. Den gemensamma ikonen sätts för Qt-fönster
@@ -419,13 +457,25 @@ verkligen avslutats, inte tills fönstret döljs. Om systemfält saknas används
 vanlig minimering och stängning; om det försvinner visas fönstret minimerat
 igen. Funktion och ikonutseende beror på skrivbordets systemfältsstöd.
 
-Trycklogotypen `assets/fordonsreg-logo.svg`, appikonens vektororiginal och
-`assets/LOGOTYP.md` ingår i programmets release och uppdaterarens tillåtna
-programfiler. De levereras tillsammans med appen; ingen separat nedladdning
-krävs. Trycklogotypen är skalbar, med transparent bakgrund och vektorbanor utan
-inbäddad rasterbild eller typsnitt. Färgerna anges i sRGB. Be tryckeriet om
-CMYK-/dekorfärgsanpassning och provtryck. Designens tunna detaljer kan bli
-svåra att se i mycket små format och kräver särskild kontroll på mörkt material.
+Logotypen är ett **FR-monogram där R:ets ben pekar ner mot en väg**, ritat som
+fyllda vektorformer på ett 280 × 280-rutnät: inga rasterbilder, inget typsnitt
+och inga streck som kan bli olika tjocka i olika program. Samma motiv används i
+hela programmet – ikonen i menyraden, fönstret, systemfältet och genvägen.
+
+- `assets/fordonsreg-logo.svg` – trycklogotyp, 112 × 112 mm, transparent
+  bakgrund, med namngivna lager (`lager-platta`, `lager-monogram`, `lager-vag`).
+- `assets/fordonsreg-logo-tryck.pdf` – tryckoriginal i PDF med samma
+  vektorbanor på en sida om exakt 112 × 112 mm.
+- `assets/fordonsreg-icon.svg` – appikonen med vit rundad platta.
+- `ikon_16/32/64/256.png`, `ikon.ico` (16–256 px i samma fil) och
+  `assets/fordonsreg-source.png` (1024 px) – alla renderade direkt från
+  vektorn, aldrig uppskalade.
+- `assets/LOGOTYP.md` – färger, lagernamn och hur filerna återskapas.
+
+Filerna ingår i releasen och i uppdaterarens tillåtna programfiler, så de
+levereras med appen utan separat nedladdning. Färgerna anges i sRGB
+(marinblått **#071F40**, turkos **#2DE8F5**, orange **#E75E1D**). Be tryckeriet
+om CMYK-/dekorfärgsanpassning och provtryck.
 
 Om autostart aktiveras på Windows används också en Fordonsreg-genväg med den
 nya ikonen, i stället för att registrera Python direkt i Registry. Den tidigare
@@ -704,14 +754,19 @@ Nya loggposter som når den vanliga logghanteringen sparas även per lokalt
 kalenderdatum i `logs/dagliga/ÅÅÅÅ-MM-DD.log`. Från nästa dag flyttas en färdig
 dagslogg till `logs/arkiv/`. Kontrollen sker vid start, när poster skrivs och
 ungefär varje minut medan appen eller startprocessen körs. Missade dagar tas
-vid nästa kontroll. Arkiv raderas inte automatiskt; namn med nummersuffix används
-om ett arkiv redan finns. Gamla loggar från före denna funktion byggs inte om
+vid nästa kontroll. **Arkiverade loggar sparas i sju dagar** och raderas sedan
+automatiskt vid samma kontroll; filer vars namn inte är ett datum lämnas orörda.
+Namn med nummersuffix används om ett arkiv redan finns. Gamla loggar från före denna funktion byggs inte om
 eller raderas, och vanliga kategoriloggar och deras rotation fortsätter som förut.
 
 **`logs/felkoder.json`** innehåller uttryckliga interna programfelkoder som
 loggats som varning eller fel, med status `aktiv` eller `åtgärdad`. Det är en
-separat fil från dagsarkiven och den kan läsas via **Verktyg → Visa
-felsökningslogg → Programfelkoder**. En vanlig feltext är inte automatiskt en
+separat fil från dagsarkiven och den visas som fliken **Aktiva fel** i
+**Verktyg → Visa felsökningslogg**. Där listas bara fel som fortfarande gäller.
+När du själv har rättat ett fel markerar du raden och väljer **Markera
+åtgärdade**; därefter kan posten tas bort med **Ta bort ur felloggen**. Ett
+aktivt fel kan aldrig tas bort av misstag – det måste markeras åtgärdat först.
+Åtgärdade poster som är äldre än sju dagar rensas automatiskt. En vanlig feltext är inte automatiskt en
 felkod; koder från svarsfiler ingår inte. Filen kan innehålla känsliga uppgifter.
 Om samma fel återkommer blir det aktivt igen.
 

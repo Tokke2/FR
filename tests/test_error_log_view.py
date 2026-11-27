@@ -29,11 +29,23 @@ def isolated_methods(path: Path, class_name: str, names: set[str], env: dict):
     return env['Isolated']
 
 
+class Server(SimpleNamespace):
+    """Låtsaswidget som tar emot anrop utan Qt och minns dem."""
+
+    def __getattr__(self, name):
+        if name.startswith('__'):
+            raise AttributeError(name)
+        mock = Mock()
+        setattr(self, name, mock)
+        return mock
+
+
 class FakeViewer:
-    def __init__(self): self.text = ''
+    def __init__(self): self.text = ''; self.visible = None
     def clear(self): self.text = ''
     def setPlainText(self, text): self.text = text
     def toPlainText(self): return self.text
+    def setVisible(self, value): self.visible = value
 
 
 class ErrorLogViewTests(unittest.TestCase):
@@ -97,9 +109,13 @@ class ErrorLogViewTests(unittest.TestCase):
         clipboard = Mock()
         env = {'Path': Path, 'BACKUPS': 3, 'MAX_DISPLAY_BYTES': 2 * 1024 * 1024,
                'read_log_tail': read_log_tail,
+               # De nya flikfunktionerna testas separat nedan; här låtsas vi
+               # att registret är tomt.
+               'active_error_codes': lambda folder: [],
+               'error_rows': lambda folder: [],
                'QApplication': SimpleNamespace(clipboard=lambda: clipboard)}
         cls = isolated_methods(ROOT / 'plugins/main_gui/dialogs/error_log_dialog.py', 'ErrorLogDialog',
-                               {'_selected_path', '_reload', '_copy_text'}, env)
+                               {'_selected_path', '_reload', '_copy_text', '_reload_faults'}, env)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'felsokning.log'
             path.write_text('Felet inträffade\n', encoding='utf-8')
@@ -111,14 +127,23 @@ class ErrorLogViewTests(unittest.TestCase):
             dialog._status = SimpleNamespace(setText=Mock())
             dialog._copy = SimpleNamespace(setEnabled=Mock())
             dialog._viewer = FakeViewer()
+            dialog._faults = Server()
+            dialog._faults_panel = SimpleNamespace(setVisible=Mock())
             dialog._reload()
             self.assertEqual(dialog._viewer.text, 'Felet inträffade\n')
             dialog._copy_text(); clipboard.setText.assert_called_once_with('Felet inträffade\n')
             selected[0] = 1; dialog._reload()
             self.assertEqual(dialog._viewer.text, 'Äldre fel\n')
             path.with_name('felkoder.json').write_text('{"status": "aktiv"}', encoding='utf-8')
+            faults = dialog._faults
+            dialog._status.setText = Mock()
+            self.assertTrue(dialog._viewer.visible)
             selected[0] = -1; dialog._reload()
-            self.assertIn('aktiv', dialog._viewer.text)
+            # Fliken Aktiva fel visar tabellen i stället för rå JSON-text.
+            self.assertFalse(dialog._viewer.visible)
+            dialog._faults_panel.setVisible.assert_called_with(True)
+            faults.setRowCount.assert_called_with(0)
+            self.assertIn('Inga aktiva fel', dialog._status.setText.call_args.args[0])
             self.assertEqual(dialog._path_label.setText.call_args.args[0], str(path.with_name('felkoder.json')))
             selected[0] = 2; dialog._reload()
             self.assertEqual(dialog._viewer.text, '')

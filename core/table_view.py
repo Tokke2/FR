@@ -53,9 +53,68 @@ def freeze_first_column(view: Any) -> bool:
     return False
 
 
+def enable_sorting(view: Any, movable: bool = True) -> bool:
+    """Gör tabellen sorterbar och låt användaren flytta kolumnerna.
+
+    Sorteringen startar avsiktligt **avstängd när rader fylls på**, annars
+    sorteras raderna om mitt under en pågående import och hamnar i fel ordning.
+    Anroparen slår på den när tabellen är fylld. Kolumnerna kan flyttas med
+    musen och ordningen sparas i kolumnprofilen (förslag 7).
+    """
+    ok = False
+    try:
+        if hasattr(view, "setSortingEnabled"):
+            view.setSortingEnabled(True)
+            ok = True
+        if hasattr(view, "horizontalHeader"):
+            header = view.horizontalHeader()
+            if hasattr(header, "setSortIndicatorShown"):
+                header.setSortIndicatorShown(True)
+    except Exception:
+        return False
+    try:
+        header = view.horizontalHeader()
+        if hasattr(header, "setSectionsMovable"):
+            header.setSectionsMovable(bool(movable))
+        if hasattr(header, "setSectionsClickable"):
+            header.setSectionsClickable(True)
+    except Exception:
+        pass
+    return ok
+
+
+def sort_by(view: Any, column: int, order: Any = None) -> bool:
+    """Sortera på en kolumn. ``order`` är Qt:s SortOrder om den finns."""
+    try:
+        if order is None:
+            view.sortByColumn(int(column), 0)
+        else:
+            view.sortByColumn(int(column), order)
+        return True
+    except Exception:
+        return False
+
+
+def move_column(view: Any, source: int, target: int) -> bool:
+    """Flytta en kolumn till en ny plats och behåll innehållet."""
+    try:
+        header = view.horizontalHeader()
+        if not hasattr(header, "moveSection"):
+            return False
+        header.moveSection(int(source), int(target))
+        return True
+    except Exception:
+        return False
+
+
 def configure(view: Any, *, density: str = "normal", word_wrap: bool | None = None,
-              freeze_first: bool = False) -> Any:
-    """Grundinställningar som ska gälla alla tabeller i programmet."""
+              freeze_first: bool = False, sortable: bool = True,
+              movable: bool = True) -> Any:
+    """Grundinställningar som ska gälla alla tabeller i programmet.
+
+    Tabeller får sorterbara rubriker och flyttbara kolumner, så att
+    användaren kan ordna om det som är viktigast för stunden.
+    """
     try:
         view.setAlternatingRowColors(True)
         view.setSelectionBehavior(view.SelectionBehavior.SelectRows)
@@ -64,6 +123,8 @@ def configure(view: Any, *, density: str = "normal", word_wrap: bool | None = No
     except Exception:
         pass
     apply_density(view, density, word_wrap)
+    if sortable:
+        enable_sorting(view, movable)
     if freeze_first:
         freeze_first_column(view)
     return view

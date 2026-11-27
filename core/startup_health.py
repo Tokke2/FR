@@ -19,12 +19,14 @@ import json
 import logging
 import os
 from pathlib import Path, PurePosixPath
+import shutil
 import tempfile
 
 _log = logging.getLogger(__name__)
 
 HEALTH_VERSION = 1
 STATE_DIR = ".health"
+BACKUP_DIR = ".update-backups"
 PENDING_NAME = "pending.json"
 HISTORY_NAME = "recovery.jsonl"
 MAX_PENDING_BYTES = 1024 * 1024
@@ -127,8 +129,43 @@ def _load_pending(root: Path) -> dict | None:
     return data
 
 
+def remove_backup(root: Path, backup: Path | str | None) -> bool:
+    """Radera en säkerhetskopia som inte längre behövs.
+
+    Anropas först när appen har startat och fungerat efter uppdateringen.
+    Katalogen måste ligga direkt under ``<rot>/.update-backups``; allt annat
+    lämnas orört, och en symbolisk länk raderas aldrig.
+    """
+    if not backup:
+        return False
+    root = Path(root).resolve()
+    allowed = root / BACKUP_DIR
+    try:
+        path = Path(backup).resolve()
+    except (OSError, ValueError):
+        return False
+    if path == allowed or allowed not in path.parents:
+        _log.warning("Säkerhetskopian ligger utanför backupkatalogen och behålls: %s", path)
+        return False
+    if path.is_symlink() or not path.is_dir():
+        return False
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        _log.warning("Säkerhetskopian kunde inte tas bort: %s", exc)
+        return False
+    _log.info("Säkerhetskopian togs bort efter lyckad uppdatering: %s", path.name)
+    return True
+
+
 def confirm_healthy(root: Path) -> bool:
-    """Ta bort markören när appen är uppe. Returnerar True om något togs bort."""
+    """Bekräfta att appen startat: ta bort markören och säkerhetskopian.
+
+    Markören tas bort först när appen är uppe. Då är uppdateringen bevisat
+    fungerande och säkerhetskopian behövs inte längre – den tas bort direkt,
+    så att inget gammalt skräp ligger kvar. Misslyckades starten finns
+    markören kvar och kopian återställs i stället.
+    """
     try:
         path = _state_dir(root) / PENDING_NAME
         _reject_link(path)
@@ -137,11 +174,18 @@ def confirm_healthy(root: Path) -> bool:
         return False
     if not path.exists():
         return False
+    backup = None
+    try:
+        backup = _load_pending(root).get("backup")
+    except (HealthError, AttributeError):
+        backup = None
     try:
         path.unlink()
     except OSError as exc:
         _log.warning("Startmarkören kunde inte tas bort: %s", exc)
         return False
+    if backup and remove_backup(root, backup):
+        _append_history(root, {"event": "backup_removed", "backup": str(backup)})
     return True
 
 
@@ -219,6 +263,7 @@ def check_and_recover(root: Path) -> dict:
         result["error"] = str(exc)
         return result
     result["recovered"] = restored
+    # Kopian behövs inte när filerna är återställda och verifierade.
     confirm_healthy(root)
     _append_history(root, {"event": "automatic_rollback", "files": restored,
                            "backup": str(backup_path)})

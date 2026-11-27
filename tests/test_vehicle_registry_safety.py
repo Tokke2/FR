@@ -118,7 +118,10 @@ class RegistrySafetyTests(unittest.TestCase):
 
         cls = isolated('YearTab', ['_populate_list'], {'VehicleForm': Form})
         tab = cls(); tab._vehicles = [{'vin_kod': 'ABC'}]; tab._forms = {}
-        tab._table = SimpleNamespace(setRowCount=Mock(), selectRow=Mock())
+        # Sorteringen slås på efter fyllningen, så att raderna inte sorteras
+        # om mitt under påfyllningen.
+        tab._table = SimpleNamespace(setRowCount=Mock(), selectRow=Mock(),
+                                     setSortingEnabled=Mock())
         tab._clear_form_panel = Mock(); tab._add_table_row = Mock()
         tab._lbl_count = SimpleNamespace(setText=Mock()); tab._empty_label = SimpleNamespace(hide=Mock())
         tab._active_filters = []

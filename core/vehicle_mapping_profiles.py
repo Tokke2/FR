@@ -62,6 +62,10 @@ class ProfileStore:
         if existing:
             name = existing  # bevara namnet som användaren redan valt
         profiles[name] = dict(mapping)
+        self._save(data)
+
+    def _save(self, data: dict) -> None:
+        """Skriv hela filen atomiskt; en avbruten skrivning lämnar inget halvt."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix=".vehicle-profiles-", suffix=".tmp", dir=self.path.parent)
         try:
@@ -75,3 +79,51 @@ class ProfileStore:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+
+    def _profile_key(self, name: str) -> str:
+        """Hitta profilens namn utan hänsyn till versaler."""
+        if not isinstance(name, str) or not name.strip():
+            raise ProfileError("Ange profilens namn")
+        wanted = name.strip().casefold()
+        for key in self._load()["profiles"]:
+            if key.casefold() == wanted:
+                return key
+        raise ProfileError(f"Profilen '{name.strip()}' finns inte")
+
+    def delete(self, name: str) -> None:
+        """Ta bort en profil. Filen skrivs om atomiskt."""
+        data = self._load()
+        key = self._profile_key(name)
+        del data["profiles"][key]
+        self._save(data)
+
+    def rename(self, name: str, new_name: str) -> str:
+        """Byt namn på en profil och behåll mappningen. Returnerar det nya namnet."""
+        new_name = str(new_name or "").strip()
+        if not new_name or len(new_name) > 80 or any(ord(c) < 32 for c in new_name):
+            raise ProfileError("Profilnamnet måste innehålla 1–80 tecken utan radbrytningar")
+        data = self._load()
+        key = self._profile_key(name)
+        if new_name.casefold() != key.casefold():
+            taken = next((other for other in data["profiles"]
+                          if other.casefold() == new_name.casefold()), None)
+            if taken:
+                raise FileExistsError(f"Profilen '{taken}' finns redan")
+        mapping = data["profiles"].pop(key)
+        data["profiles"][new_name] = mapping
+        self._save(data)
+        return new_name
+
+
+def profile_rows(store: "ProfileStore") -> list[tuple[str, int]]:
+    """Profilnamn och antal mappade kolumner, sorterade i namnordning.
+
+    Ligger här (utan Qt) så att både profilfliken och testerna kan använda den.
+    En trasig profilfil ger en tom lista i stället för ett krasch.
+    """
+    try:
+        profiles = store.list_profiles()
+    except ProfileError:
+        return []
+    return sorted(((name, len(mapping)) for name, mapping in profiles.items()),
+                  key=lambda row: row[0].casefold())

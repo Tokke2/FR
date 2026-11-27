@@ -115,11 +115,15 @@ class SystemTrayTests(unittest.TestCase):
         app = SimpleNamespace(windowIcon=lambda: icon or IconStub(), instance=lambda: app_instance)
         env = {'QApplication': app, 'QMenu': MenuStub, 'QTimer': TimerStub, 'Path': Path,
                '__file__': str(Path('plugins/main_gui/plugin.py').resolve()), '_log': Mock(),
+               'get_plugin_safe': lambda app, name: None,
                # Bakgrundsläget räknar intervall med runtime_policy (energisparläge).
                'runtime_policy': runtime_policy}
         methods = {'_setup_system_tray', '_show_from_tray', '_tray_activated', 'add_update_tray_action',
                    '_watched_message_clicked',
-                   '_quit_application', '_can_hide_to_tray', '_check_tray_available', '_hide_if_still_minimized'}
+                   '_quit_application', '_can_hide_to_tray', '_check_tray_available', '_hide_if_still_minimized',
+                   # Avslutet ber uppdateringen starta om appen när en
+                   # uppdatering väntar.
+                   '_restart_after_update'}
         cls = main_window_methods(methods, env)
         window = cls(); window._tray_icon = window._tray_menu = window._tray_separator = None
         # Snabbåtgärderna i systemfältet anropar fönstrets metoder.

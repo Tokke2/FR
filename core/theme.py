@@ -222,12 +222,12 @@ PREFERRED_HEIGHT: Final[int] = 900
 
 def window_size(available_width: int, available_height: int,
                 preferred: tuple[int, int] = (PREFERRED_WIDTH, PREFERRED_HEIGHT)) -> tuple[int, int]:
-    """Anpassa fönstret till skärmen i stället för att kräva 1400×900.
+    """Anpassa fönstret till skärmen: full höjd, bredd efter behov.
 
-    Fönstret tar högst 90 % av skärmens arbetsyta, aldrig mer än den
-    föredragna storleken, och aldrig mindre än minimimåtten – men minimimåtten
-    får inte heller överskrida skärmen. Resultatet blir alltid ett fönster som
-    ryms, även på en liten bärbar datorskärm.
+    Höjden tar hela skärmens arbetsyta – då syns så många rader som möjligt utan
+    rullning. Bredden tar den föredragna bredden, eller 90 % av skärmen om den
+    är mindre, och aldrig under minimimåttet (som i sin tur krymper om skärmen
+    är mindre än så). Resultatet ryms alltid, även på en liten bärbar datorskärm.
     """
     try:
         width = int(available_width)
@@ -237,12 +237,10 @@ def window_size(available_width: int, available_height: int,
     if width <= 0 or height <= 0:
         return preferred
     usable_w = max(1, int(width * 0.90))
-    usable_h = max(1, int(height * 0.90))
-    target_w = min(preferred[0], usable_w)
-    target_h = min(preferred[1], usable_h)
-    min_w = min(MIN_WINDOW_WIDTH, usable_w)
-    min_h = min(MIN_WINDOW_HEIGHT, usable_h)
-    return max(target_w, min_w), max(target_h, min_h)
+    target_w = max(min(preferred[0], usable_w), min(MIN_WINDOW_WIDTH, usable_w))
+    # Hela höjden: fönstret ska fylla skärmen på höjden.
+    target_h = max(1, height)
+    return target_w, target_h
 
 
 def sidebar_width(window_width: int) -> int:
@@ -883,6 +881,8 @@ ICON_NAMES: Final[tuple[str, ...]] = (
     "vehicle", "schema", "table", "dealers", "colors", "dispatch",
     "generate", "reports", "search", "dashboard", "folder", "error",
     "help", "exit", "refresh", "save", "settings", "theme-dark", "theme-light", "theme-auto",
+    # Nya ikoner: minne, logg, uppdatering, profil, kolumner och omstart.
+    "memory", "log", "update", "profile", "columns", "restart",
 )
 
 

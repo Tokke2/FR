@@ -137,7 +137,10 @@ def _validate_icon(name: str, content: bytes) -> None:
 
 def _validate_brand_svg(name: str, content: bytes) -> None:
     """Endast statiska, lokala vektorbanor; inga skript, resurser eller rasterbilder."""
-    if len(content) > 1024 * 1024 or b'<!' in content:
+    # Kommentarer och grupplager är tillåtna (de behövs för en redigerbar
+    # logotyp), men aldrig DTD:er eller entiteter – de kan läsa lokala filer.
+    lowered = content.lower()
+    if len(content) > 1024 * 1024 or b'<!doctype' in lowered or b'<!entity' in lowered:
         raise UpdateError(f"Ogiltig SVG: {name}")
     try:
         root = ET.fromstring(content)
@@ -147,7 +150,9 @@ def _validate_brand_svg(name: str, content: bytes) -> None:
         allowed = {
             'svg': {'width', 'height', 'viewBox', 'role', 'aria-labelledby'},
             'title': {'id'}, 'desc': {'id'},
-            'path': {'fill', 'fill-rule', 'd'},
+            # Ett namngivet lager som tryckeriet kan färgsätta var för sig.
+            'g': {'id', 'fill'},
+            'path': {'id', 'fill', 'fill-rule', 'd'},
             'rect': {'x', 'y', 'width', 'height', 'rx', 'ry', 'fill'},
         }
         paths = 0

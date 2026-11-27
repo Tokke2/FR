@@ -104,6 +104,10 @@ DEFAULT_SETTINGS: Final[Dict[str, Any]] = {
     "plugin_states": {},
     "mode": "prod",
     "smart_cache": True,
+    # Daglig uppdateringskontroll klockan 00:00 och automatisk omstart efter
+    # en lyckad uppdatering. Kan stängas av i menyn Start och uppdatering.
+    "update_daily_check": True,
+    "update_restart": True,
     "window": {
         "width": 1200,
         "height": 800,
@@ -126,6 +130,8 @@ _SCHEMA_TYPES: Final[Dict[str, type]] = {
     "plugin_states": dict,
     "mode": str,
     "smart_cache": bool,
+    "update_daily_check": bool,
+    "update_restart": bool,
     "window": dict,
 }
 

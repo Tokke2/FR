@@ -127,3 +127,27 @@ def hide_console_window() -> bool:
 def default_creation_flags() -> int:
     """Flaggor för ``Popen`` där anroparen själv bygger kommandot."""
     return CREATE_NO_WINDOW if IS_WINDOWS else 0
+
+
+def relaunch_arguments(entry: str, argv: list[str]) -> list[str]:
+    """Bygg omstartskommandot så att appen startar utan terminal igen.
+
+    Vid omstart efter en uppdatering ska samma startväg användas som vid en
+    vanlig start: ``pythonw.exe`` med startkontrollen om den finns, annars
+    appens egen startfil. Terminalfönstret får aldrig synas.
+    """
+    base = Path(entry).resolve().parent
+    launcher = base / "start.pyw"
+    if launcher.is_file():
+        # Startkontrollen gör starthälsokontrollen, låset och loggningen.
+        return [gui_executable(), str(launcher), *argv]
+    return [gui_executable(), str(Path(entry).resolve()), *argv]
+
+
+def spawn_detached(arguments: list[str], cwd: str | Path) -> None:
+    """Starta en ny process helt utan fönster och utan att vänta på den."""
+    subprocess.Popen(
+        arguments, cwd=str(cwd), stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        close_fds=True, **hidden_kwargs(),
+    )

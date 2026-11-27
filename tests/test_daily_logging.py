@@ -13,7 +13,11 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from core.daily_logging import DailyLogHandler, append_daily, archive_old_days, record_error_code, resolve_config_parse_error
+from core.daily_logging import (
+    DailyLogHandler, active_error_codes, append_daily, archive_old_days, load_error_codes,
+    mark_resolved, prune_resolved, purge_archived_days, record_error_code, remove_error_codes,
+    resolve_config_parse_error,
+)
 from core.exceptions import ConfigParseError, CoreError
 from core.config import Configuration
 
@@ -54,8 +58,27 @@ class DailyArchiveTests(unittest.TestCase):
             for name in ('2026-01-01.log', '2026-11-03.log', '2027-01-01.log', 'unknown.log'):
                 (daily / name).write_text(name)
             archive_old_days(root, date(2026, 11, 4))
-            self.assertEqual({p.name for p in (root / 'arkiv').iterdir()}, {'2026-01-01.log', '2026-11-03.log'})
+            # Gårdagens logg arkiveras och sparas i sju dagar. En arkivfil som
+            # redan är äldre än sju dagar raderas samtidigt, och det görs först
+            # när den är kopierad till arkivet.
+            self.assertEqual({p.name for p in (root / 'arkiv').iterdir()}, {'2026-11-03.log'})
             self.assertEqual({p.name for p in daily.iterdir()}, {'2027-01-01.log', 'unknown.log'})
+            self.assertFalse((daily / '2026-01-01.log').exists())
+
+    def test_archive_keeps_seven_days_and_removes_older_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); today = date(2026, 11, 4)
+            archive = root / 'arkiv'; archive.mkdir()
+            # Dagens arkiv skapas av den ordinarie arkiveringen och räknas med.
+            keep = [today - timedelta(days=offset) for offset in range(0, 7)]
+            gone = [today - timedelta(days=offset) for offset in (8, 30)]
+            for day in keep + gone:
+                (archive / f'{day.isoformat()}.log').write_text(day.isoformat())
+            (archive / 'anteckning.txt').write_text('behålls')
+            archive_old_days(root, today)
+            left = {p.name for p in archive.iterdir()}
+            self.assertEqual(left, {f'{day.isoformat()}.log' for day in keep} | {'anteckning.txt'})
+            self.assertEqual(purge_archived_days(root, today), [])
 
     def test_monitor_archives_without_new_log_entries(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -217,3 +240,59 @@ class ActualStartupCodeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ErrorCodeRegisterTests(unittest.TestCase):
+    """Aktiva fel ska kunna markeras åtgärdade och tas bort – inte gissas bort."""
+
+    def _root(self, tmp):
+        root = Path(tmp)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / 'felkoder.json').write_text(json.dumps({'version': 1, 'entries': {
+            'a': {'code': 'IMPORT_FORMAT', 'message': 'Fel format', 'status': 'aktiv',
+                  'last_seen_epoch': 20, 'last_seen': '2026-10-28T10:00:00+02:00', 'count': 3},
+            'b': {'code': 'CONFIG_PARSE_ERROR', 'message': 'Trasig config', 'status': 'åtgärdad',
+                  'last_seen_epoch': 10, 'resolved_at': '2026-10-01T10:00:00+02:00', 'count': 1},
+        }}), encoding='utf-8')
+        return root
+
+    def test_lists_only_active_faults_newest_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            self.assertEqual([row['code'] for row in load_error_codes(root)],
+                             ['IMPORT_FORMAT', 'CONFIG_PARSE_ERROR'])
+            self.assertEqual([row['code'] for row in active_error_codes(root)], ['IMPORT_FORMAT'])
+            self.assertEqual(active_error_codes(root)[0]['key'], 'a')
+
+    def test_resolved_fault_can_be_removed_but_an_active_fault_cannot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            self.assertEqual(remove_error_codes(root, ['a']), 0)
+            self.assertEqual(len(load_error_codes(root)), 2)
+            self.assertEqual(mark_resolved(root, ['a'], 'Rättat i importen'), 1)
+            entry = next(row for row in load_error_codes(root) if row['key'] == 'a')
+            self.assertEqual(entry['status'], 'åtgärdad')
+            self.assertTrue(entry['resolved_at'])
+            self.assertEqual(remove_error_codes(root, ['a', 'b']), 2)
+            self.assertEqual(load_error_codes(root), [])
+
+    def test_marking_the_same_fault_twice_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            self.assertEqual(mark_resolved(root, ['a']), 1)
+            self.assertEqual(mark_resolved(root, ['a']), 0)
+            self.assertEqual(mark_resolved(root, []), 0)
+            self.assertEqual(remove_error_codes(root, []), 0)
+
+    def test_broken_register_gives_an_empty_list_instead_of_a_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'felkoder.json').write_text('inte json', encoding='utf-8')
+            self.assertEqual(load_error_codes(root), [])
+            self.assertEqual(active_error_codes(root), [])
+
+    def test_old_resolved_faults_are_pruned_but_active_ones_stay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            self.assertEqual(prune_resolved(root, 7, date(2026, 10, 29)), 1)
+            self.assertEqual([row['code'] for row in load_error_codes(root)], ['IMPORT_FORMAT'])

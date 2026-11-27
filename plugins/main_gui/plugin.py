@@ -766,6 +766,9 @@ class MainWindow(QMainWindow):
             if not self.close():
                 self._quit_requested = False
                 return
+            # En väntande uppdatering installeras när appen avslutas. Då ska
+            # appen komma tillbaka av sig själv, utan terminalfönster.
+            self._restart_after_update()
             application = QApplication.instance()
             if application is not None:
                 application.quit()
@@ -773,6 +776,21 @@ class MainWindow(QMainWindow):
             self._quit_requested = False
             _log.exception("Kunde inte avsluta Fordonsreg")
             raise
+
+    def _restart_after_update(self) -> bool:
+        """Be uppdateringen starta om appen. Fel får aldrig hindra avslutet."""
+        try:
+            plugin = get_plugin_safe(self.app, "auto_update")
+        except Exception:
+            plugin = None
+        starter = getattr(plugin, "restart_after_update", None)
+        if starter is None:
+            return False
+        try:
+            return bool(starter())
+        except Exception:
+            _log.exception("Automatisk omstart efter uppdateringen misslyckades")
+            return False
 
     def _watched_message_clicked(self) -> None:
         """Tray-notisen om en ny fil öppnar importen – användaren väljer själv fil."""
@@ -860,6 +878,13 @@ class MainWindow(QMainWindow):
         position = getattr(self, "_restore_position", None)
         if position:
             self.move(position[0], position[1])
+        else:
+            # Fönstret fyller skärmens höjd: lägg det i överkanten av
+            # arbetsytan så att statusraden syns och inget hamnar utanför.
+            screen = QApplication.primaryScreen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                self.move(available.x(), available.y())
         # Fönstret får aldrig bli mindre än skärmen tillåter.
         self.setMinimumSize(min(design.MIN_WINDOW_WIDTH, self.window_config.width),
                             min(design.MIN_WINDOW_HEIGHT, self.window_config.height))
@@ -1585,6 +1610,7 @@ class MainWindow(QMainWindow):
         self.window_config = WindowConfig(width=width, height=height,
                                           sidebar_width=design.sidebar_width(width))
         self.resize(width, height)
+        self.move(available.x(), available.y())
         # Bredden sätts på delaren, så att användaren fortfarande kan dra i den.
         if getattr(self, "main_splitter", None) is not None:
             self.main_splitter.setSizes([self.window_config.sidebar_width,
@@ -1630,6 +1656,19 @@ class MainWindow(QMainWindow):
         settings_menu = menubar.addMenu("Inställningar")
         settings_menu.addAction("🔐 Gemensam PIN-kod...", self._settings_shared_pin)
         settings_menu.addAction("🔢 Hantera FilID-serie...", self._manage_file_id)
+        settings_menu.addSeparator()
+        # Profiler för importen har en egen flik i stället för spridda
+        # "spara profil"-knappar. Gäller de program som använder profilagret.
+        settings_menu.addAction("🗂 Profiler för import...", self._settings_profiles)
+
+    def _settings_profiles(self) -> None:
+        """Öppna profilfliken. En trasig profilfil får inte hindra resten."""
+        try:
+            from plugins.main_gui.dialogs.profiles_tab import ProfilesDialog
+            ProfilesDialog(self).exec()
+        except Exception as exc:
+            _log.exception("Kunde inte öppna profilinställningarna")
+            QMessageBox.warning(self, "Profiler", f"Profilinställningarna kunde inte öppnas: {exc}")
 
     def _settings_shared_pin(self) -> None:
         from plugins.main_gui.dialogs.dealer_pin import change_pin

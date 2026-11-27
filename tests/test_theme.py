@@ -105,17 +105,18 @@ class ScreenWidthTests(unittest.TestCase):
     def test_small_screen_gets_a_window_that_fits(self):
         width, height = design.window_size(1366, 768)
         self.assertLessEqual(width, int(1366 * 0.9))
-        self.assertLessEqual(height, int(768 * 0.9))
         self.assertGreaterEqual(width, design.MIN_WINDOW_WIDTH)
-        self.assertGreaterEqual(height, design.MIN_WINDOW_HEIGHT)
+        # Hela höjden används, så att så många rader som möjligt syns.
+        self.assertEqual(height, 768)
 
-    def test_large_screen_does_not_get_an_endless_window(self):
-        self.assertEqual(design.window_size(3840, 2160), (design.PREFERRED_WIDTH, design.PREFERRED_HEIGHT))
+    def test_large_screen_gets_full_height_but_a_sane_width(self):
+        self.assertEqual(design.window_size(3840, 2160), (design.PREFERRED_WIDTH, 2160))
+        self.assertLess(design.window_size(3840, 2160)[0], 3840)
 
     def test_tiny_screen_still_gets_a_usable_window(self):
         width, height = design.window_size(800, 600)
-        self.assertLessEqual(width, 720)
-        self.assertLessEqual(height, 540)
+        self.assertLessEqual(width, 800)
+        self.assertEqual(height, 600)
 
     def test_broken_screen_size_gives_the_preferred_size(self):
         self.assertEqual(design.window_size(0, 0), (design.PREFERRED_WIDTH, design.PREFERRED_HEIGHT))
