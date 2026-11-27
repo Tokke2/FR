@@ -179,6 +179,37 @@ def _validate_brand_svg(name: str, content: bytes) -> None:
     except (ET.ParseError, UnicodeError, ValueError, AttributeError) as exc:
         raise UpdateError(f"Ogiltig SVG: {name}") from exc
 
+THEME_ICON_TAGS = frozenset({"svg", "title", "desc", "path", "rect", "circle", "line",
+                             "polyline", "polygon", "ellipse", "g"})
+
+
+def _validate_theme_icon(name: str, content: bytes) -> None:
+    """En temaikon är en enkel 24 × 24-SVG utan skript eller externa resurser.
+
+    Kontrollen görs **före** några filer byts ut. Utan den skulle ikonerna
+    hamna i Python-kontrollen och hela uppdateringen avvisas.
+    """
+    if len(content) > MAX_ICON_FILE or not content.lstrip().startswith(b"<"):
+        raise UpdateError(f"Ogiltig ikon: {name}")
+    lowered = content.lower()
+    for forbidden in (b"<script", b"<!doctype", b"<!entity", b"javascript:", b"href=", b"url(",
+                      b"<image", b"<foreignobject", b"data:"):
+        if forbidden in lowered:
+            raise UpdateError(f"Ogiltig ikon: {name}")
+    try:
+        root = ET.fromstring(content)
+    except (ET.ParseError, UnicodeError, ValueError) as exc:
+        raise UpdateError(f"Ogiltig ikon: {name}") from exc
+    ns = "{http://www.w3.org/2000/svg}"
+    if root.tag != ns + "svg" or root.get("viewBox") != "0 0 24 24":
+        raise UpdateError(f"Ogiltig ikon: {name}")
+    for element in root.iter():
+        if not isinstance(element.tag, str) or not element.tag.startswith(ns):
+            raise UpdateError(f"Ogiltig ikon: {name}")
+        if element.tag[len(ns):].lower() not in THEME_ICON_TAGS:
+            raise UpdateError(f"Ogiltig ikon: {name}")
+
+
 def release_files(archive: bytes) -> dict[str, bytes]:
     """Läs endast tillåtna reguljära källfiler från GitHubs zipball."""
     if len(archive) > MAX_ARCHIVE:
@@ -226,6 +257,8 @@ def release_files(archive: bytes) -> dict[str, bytes]:
             # Fånga upp ofullständiga releasefiler innan några filer byts ut.
             if key in ICON_FILES:
                 _validate_icon(key, content)
+            elif _is_theme_icon(key):
+                _validate_theme_icon(key, content)
             elif key in SVG_FILES:
                 _validate_brand_svg(key, content)
             elif key in BRAND_DOC_FILES | LICENSE_FILES:

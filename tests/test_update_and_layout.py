@@ -216,3 +216,43 @@ class ScheduleAndSettingsTests(unittest.TestCase):
         self.assertIn("Kontrollera uppdateringar varje dag klockan 00:00", source)
         self.assertIn("Starta om automatiskt efter uppdatering", source)
         self.assertIn('self.settings.set("update_daily_check"', source)
+
+
+class ThemeIconValidationTests(unittest.TestCase):
+    """Temaikonerna ska kontrolleras som ikoner – inte som Pythonfiler."""
+
+    def setUp(self):
+        from plugins.auto_update import updater
+        self.updater = updater
+
+    def test_a_normal_icon_is_accepted(self):
+        icon = (ROOT / "assets/icons/memory.svg").read_bytes()
+        self.updater._validate_theme_icon("assets/icons/memory.svg", icon)
+
+    def test_every_icon_in_the_project_passes(self):
+        for path in sorted((ROOT / "assets/icons").glob("*.svg")):
+            self.updater._validate_theme_icon(f"assets/icons/{path.name}", path.read_bytes())
+
+    def test_icons_with_scripts_or_wrong_grid_are_refused(self):
+        bad = [
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><script>alert(1)</script></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path href="https://example.org"/></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><image href="x"/></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M0 0"/></svg>',
+            b'<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"/>',
+            b'inte en svg',
+        ]
+        for content in bad:
+            with self.assertRaises(self.updater.UpdateError):
+                self.updater._validate_theme_icon("assets/icons/test.svg", content)
+
+    def test_release_archive_accepts_icons_next_to_python_files(self):
+        import io, zipfile
+        icon = (ROOT / "assets/icons/log.svg").read_bytes()
+        code = b"x = 1\n"
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as z:
+            z.writestr("release/assets/icons/log.svg", icon)
+            z.writestr("release/core/en_modul.py", code)
+        files = self.updater.release_files(out.getvalue())
+        self.assertEqual(set(files), {"assets/icons/log.svg", "core/en_modul.py"})
