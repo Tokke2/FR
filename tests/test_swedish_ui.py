@@ -29,6 +29,7 @@ FILES = (
     "plugins/main_gui/vehicle_registry_page.py",
     "plugins/main_gui/dialogs/screenshot_dialog.py",
     "plugins/main_gui/dialogs/error_log_dialog.py",
+    "plugins/main_gui/dialogs/profiles_tab.py",
     "plugins/data_viewer/plugin.py",
     "plugins/reports/plugin.py",
     "plugins/dealers_manager/plugin.py",
